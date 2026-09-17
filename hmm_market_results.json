@@ -1,0 +1,21 @@
+{
+  "market_ticker": "SPY",
+  "result_date": "2026-09-11",
+  "regime_label": "TURBULENT",
+  "state_id": 0,
+  "probability": 0.5366113313113083,
+  "state_probabilities": [
+    0.5366113313113083,
+    0.16888814332874397,
+    3.1282539724691803e-11,
+    0.2945005179309101,
+    7.397754985072647e-09
+  ],
+  "base_multiplier": 0.375,
+  "is_regime_confirmed": false,
+  "is_flickering": false,
+  "stability_bars": 1,
+  "bic_score": 12016.523716979,
+  "n_states": 5,
+  "trained_at": "2026-09-14T16:25:12.747898+00:00"
+}

@@ -1,0 +1,21 @@
+{
+  "market_ticker": "SPY",
+  "result_date": "2026-09-11",
+  "regime_label": "MODERATE",
+  "state_id": 4,
+  "probability": 0.9705580095023034,
+  "state_probabilities": [
+    2.496876354436729e-124,
+    0.029434914473573867,
+    7.076024122608042e-06,
+    9.197648111962082e-299,
+    0.9705580095023034
+  ],
+  "base_multiplier": 0.5625,
+  "is_regime_confirmed": false,
+  "is_flickering": false,
+  "stability_bars": 1,
+  "bic_score": 11908.235405306044,
+  "n_states": 5,
+  "trained_at": "2026-09-14T15:13:58.345715+00:00"
+}

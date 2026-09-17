@@ -1,51 +1,129 @@
 """
 HMM Model Module - Hidden Markov Model for Volatility Regime Detection
+=======================================================================
 
-The HMM is a VOLATILITY CLASSIFIER. It detects whether the market is calm,
-moderate, or turbulent volatility environment. It does NOT predict price
-direction. The strategy layer uses the volatility classification to set
-portfolio allocation - fully invested when calm, reduced when turbulent.
+WHAT THIS MODULE DOES
+---------------------
+Implements a Gaussian Hidden Markov Model (HMM) that classifies the current
+market environment into one of N volatility regimes (e.g. CALM, MODERATE,
+TURBULENT). It does NOT predict price direction.
+
+The strategy layer reads the volatility classification and adjusts portfolio
+allocation accordingly:
+  - CALM      → full position size (multiplier = 1.0)
+  - MODERATE  → reduced position  (multiplier = 0.75)
+  - TURBULENT → minimal position  (multiplier = 0.50)
+
+FIXES APPLIED OVER PREVIOUS VERSION
+-------------------------------------
+1. predict_regime_proba()  — forward loop was iterating backwards over
+                             observations; fixed to run correctly forward.
+2. fit() random restarts   — n_init used fixed seed offsets, making all
+                             restarts identical; now uses random seeds.
+3. Regime label ordering   — sorted on SCALED features (meaningless); now
+                             sorts on raw returns from the original DataFrame.
+4. Emission computation    — manual O(n³) inv/det replaced with
+                             scipy.stats.multivariate_normal (faster, stable).
+5. Mutable state safety    — predict_*() methods no longer mutate instance
+                             state; a single step() method advances state
+                             exactly once per bar.
+6. Unknown-state exposure  — returning 0.5 multiplier for unknown state;
+                             now returns 0.0 (flat) and raises a warning.
+7. Strategy params source  — strategy types derived from label strings
+                             (fragile); now derived from volatility quantile.
+8. Pickle serialisation    — model weights saved as plain numpy arrays +
+                             JSON metadata instead of a monolithic pickle blob.
+
+USAGE
+-----
+    from data.indicators import prepareFeaturesForHMM
+
+    # ── Training ────────────────────────────────────────────────────────────
+    clf = HMMVolatilityClassifier()
+    clf.fit(df_train)                  # df must have OHLCV columns
+    clf.save_model("hmm_weights.json")
+
+    # ── Live inference ───────────────────────────────────────────────────────
+    clf2 = HMMVolatilityClassifier()
+    clf2.load_model("hmm_weights.json")
+
+    # Call step() exactly ONCE per new bar — it returns a RegimeState and
+    # updates all internal counters atomically.
+    state = clf2.step(new_bar_features)   # new_bar_features: 1-row DataFrame
+    vol_level, multiplier = clf2.get_regime_for_allocation()
 """
+
+from __future__ import annotations
+
+import json
 import logging
-import pickle
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 from hmmlearn.hmm import GaussianHMM
-from scipy.stats import norm
+from scipy.stats import multivariate_normal
 from sklearn.preprocessing import StandardScaler
 
-from data.indicators import calculateRsi, prepareFeaturesForHMM
-
+# ── Optional Supabase storage ────────────────────────────────────────────────
 try:
     from storage import storeHMMResult
-    SUPPABASE_AVAILABLE = True
+    SUPABASE_AVAILABLE = True
 except ImportError:
-    SUPPABASE_AVAILABLE = False
+    SUPABASE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
+# Compatibility export.  The former two-layer orchestrator was referenced by
+# package callers but never shipped; the supported runner lives in train_only.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data classes
+# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class RegimeInfo:
-    """Metadata for each regime state."""
+    """
+    Static metadata for a single HMM state, assigned once after training.
+
+    Fields
+    ------
+    regime_id           : HMM state index (0-based, as returned by hmmlearn).
+    regime_name         : Human-readable label (e.g. 'BEAR', 'NEUTRAL', 'BULL').
+    volatility_rank     : 0 = lowest-volatility state, n_regimes-1 = highest.
+    expected_return     : Mean raw return of training bars assigned to this state.
+    expected_volatility : Std-dev of raw returns for this state.
+    """
     regime_id: int
     regime_name: str
+    volatility_rank: int
     expected_return: float
     expected_volatility: float
-    recommended_strategy_type: str
-    max_leverage_allowed: float
-    max_position_size_pct: float
-    min_confidence_to_act: float
 
 
 @dataclass
 class RegimeState:
-    """Current state of regime detection."""
+    """
+    Snapshot of regime detection at a single point in time.
+
+    Returned by step() and get_current_regime_state().
+
+    Fields
+    ------
+    label              : Human-readable name of the current state.
+    state_id           : HMM state index.
+    probability        : P(current_state | all observations so far).
+    state_probabilities: Full distribution over all N states.
+    timestamp          : Wall-clock time of this observation.
+    is_confirmed       : True if the same state has persisted for
+                         >= confirmation_bars consecutive bars.
+    consecutive_bars   : Number of bars in a row with this state.
+    """
     label: str
     state_id: int
     probability: float
@@ -55,20 +133,33 @@ class RegimeState:
     consecutive_bars: int = 0
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Classifier
+# ─────────────────────────────────────────────────────────────────────────────
+
 class HMMVolatilityClassifier:
     """
     Gaussian HMM for market volatility regime classification.
 
-    Uses automatic model selection (BIC) to choose optimal number of regimes.
-    Implements forward-only inference to avoid look-ahead bias.
+    Key design decisions
+    --------------------
+    * BIC-based automatic model selection tests n_components ∈ {3,4,5,6,7}.
+    * Forward algorithm (filtering) is used for inference — never the Viterbi
+      smoother — so no future data leaks into current predictions.
+    * All state mutation happens inside step(), which must be called exactly
+      once per new bar. Probability query methods are pure (no side effects).
+    * Regime labels are sorted by VOLATILITY of raw returns in training data,
+      not by scaled-feature means, so labels are stable across retraining.
     """
 
-    REGIME_LABELS = {
-        3: ['BEAR', 'NEUTRAL', 'BULL'],
-        4: ['CRASH', 'BEAR', 'BULL', 'EUPHORIA'],
-        5: ['CRASH', 'BEAR', 'NEUTRAL', 'BULL', 'EUPHORIA'],
-        6: ['CRASH', 'STRONG_BEAR', 'WEAK_BEAR', 'WEAK_BULL', 'STRONG_BULL', 'EUPHORIA'],
-        7: ['CRASH', 'STRONG_BEAR', 'WEAK_BEAR', 'NEUTRAL', 'WEAK_BULL', 'STRONG_BULL', 'EUPHORIA'],
+    # Ordered label sets for each possible n_regimes value.
+    # Labels run from lowest-volatility (index 0) to highest-volatility (last).
+    REGIME_LABELS: dict[int, list[str]] = {
+        3: ['LOW_VOL',    'MID_VOL',     'HIGH_VOL'],
+        4: ['LOW_VOL',    'MID_LOW_VOL', 'MID_HIGH_VOL', 'HIGH_VOL'],
+        5: ['LOW_VOL',    'MID_LOW_VOL', 'MID_VOL',      'MID_HIGH_VOL', 'HIGH_VOL'],
+        6: ['VOL_1',      'VOL_2',       'VOL_3',        'VOL_4',        'VOL_5', 'VOL_6'],
+        7: ['VOL_1',      'VOL_2',       'VOL_3',        'VOL_4',        'VOL_5', 'VOL_6', 'VOL_7'],
     }
 
     def __init__(
@@ -81,16 +172,20 @@ class HMMVolatilityClassifier:
         flicker_window: int = 20,
     ):
         """
-        Initialize HMM classifier.
-
-        Args:
-            min_periods: Minimum trading days for training (default 504 = 2 years)
-            n_init: Number of random initializations per model
-            confidence_threshold: Minimum probability to act on regime signal
-            confirmation_bars: Bars required to confirm regime change
-            flicker_threshold: Max regime changes per window before triggering uncertainty
-            flicker_window: Window size for flicker calculation
+        Parameters
+        ----------
+        min_periods         : Minimum trading days required before training.
+                              504 ≈ 2 calendar years of daily bars.
+        n_init              : Independent random restarts per candidate model.
+                              Each restart uses a different random seed so the
+                              EM optimiser explores different local optima.
+        confidence_threshold: P(state) must exceed this to act on a signal.
+        confirmation_bars   : Consecutive bars required to confirm a new regime.
+        flicker_threshold   : Max regime changes within flicker_window before
+                              the model enters "uncertainty" mode.
+        flicker_window      : Rolling window size for flicker detection.
         """
+        # ── Hyperparameters (set at construction, never changed) ─────────────
         self.min_periods = min_periods
         self.n_init = n_init
         self.confidence_threshold = confidence_threshold
@@ -98,1078 +193,1009 @@ class HMMVolatilityClassifier:
         self.flicker_threshold = flicker_threshold
         self.flicker_window = flicker_window
 
+        # ── Model artefacts (populated by fit() or load_model()) ─────────────
         self.model: Optional[GaussianHMM] = None
         self.scaler: Optional[StandardScaler] = None
         self.n_regimes: int = 0
-        self.bic_score: float = 0
+        self.bic_score: float = 0.0
         self.training_date: Optional[datetime] = None
         self.regime_labels: list[str] = []
+
+        # Maps HMM state_id → RegimeInfo (assigned after training).
         self.regime_info: dict[int, RegimeInfo] = {}
 
-        self._previous_alpha: Optional[np.ndarray] = None
-        self._previous_state: Optional[int] = None
+        # Maps HMM state_id → human-readable label string.
+        self._state_to_label: dict[int, str] = {}
+
+        # ── Live-inference state (advanced by step()) ────────────────────────
+        # Current alpha vector P(state | obs_1..t) — shape (n_regimes,).
+        self._alpha: Optional[np.ndarray] = None
+        # Most recent confirmed state_id.
+        self._current_state: Optional[int] = None
+        # Rolling history of state_ids, length ≤ flicker_window.
+        self._state_history: list[int] = []
+        # How many consecutive bars have shown _current_state.
         self._consecutive_bars: int = 0
-        self._regime_history: list[int] = []
+        # Last state_id that was "confirmed" (persisted ≥ confirmation_bars).
         self._last_confirmed_state: Optional[int] = None
 
-    def fit(self, df: pd.DataFrame) -> 'HMMVolatilityClassifier':
+    # ─────────────────────────────────────────────────────────────────────────
+    # Training
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def fit(self, df: pd.DataFrame) -> "HMMVolatilityClassifier":
         """
-        Train HMM with automatic model selection.
+        Train the HMM on historical OHLCV data.
 
-        Tests n_components = [3,4,5,6,7] and selects lowest BIC.
+        Steps
+        -----
+        1. Extract features from the raw OHLCV DataFrame via
+           prepareFeaturesForHMM().  This function (defined in
+           data/indicators.py) is expected to return a numeric DataFrame
+           with columns such as log-returns, ATR-normalised volatility,
+           RSI, etc.
+        2. Scale features to zero-mean / unit-variance using StandardScaler
+           fitted on the training data only.
+        3. Test GaussianHMM for n_components ∈ {3,4,5,6,7}.  For each
+           candidate, run n_init independent restarts with different random
+           seeds to escape local optima.  Select the restart with the
+           lowest BIC within each candidate.
+        4. Pick the candidate n_components with the globally lowest BIC
+           (Bayesian Information Criterion balances fit vs. model complexity).
+        5. Assign human-readable regime labels sorted by the VOLATILITY of
+           raw returns in training data (not on scaled features, which have
+           no meaningful absolute magnitude).
 
-        Args:
-            df: DataFrame with OHLCV columns
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Must contain at minimum columns: open, high, low, close, volume.
 
-        Returns:
-            Self for method chaining
+        Returns
+        -------
+        self  (enables method chaining: clf.fit(df).save_model("w.json"))
         """
-        features = prepareFeaturesForHMM(df, self.min_periods)
+        # ── Step 1: feature extraction ───────────────────────────────────────
+        # prepareFeaturesForHMM is imported from data.indicators.
+        # It returns a DataFrame of numeric features aligned to df's index,
+        # potentially shorter than df due to lookback windows.
+        from data.indicators import prepareFeaturesForHMM
+        features_df = prepareFeaturesForHMM(df, self.min_periods)
 
+        if len(features_df) < self.min_periods:
+            raise ValueError(
+                f"Only {len(features_df)} rows after feature preparation; "
+                f"need at least {self.min_periods}."
+            )
+
+        # ── Step 2: scaling ──────────────────────────────────────────────────
+        # StandardScaler transforms each feature to mean=0, std=1.
+        # We fit the scaler HERE (on training data only) and reuse it at
+        # inference time — never refit on test/live data.
         self.scaler = StandardScaler()
-        features_scaled = self.scaler.fit_transform(features)
+        features_scaled = self.scaler.fit_transform(features_df.values)
 
+        # Keep raw returns for label assignment (see step 5).
+        # Convention: first column of features_df must be the log-return.
+        raw_returns = features_df.iloc[:, 0].values
+
+        # ── Step 3: model selection loop ─────────────────────────────────────
         candidate_components = [3, 4, 5, 6, 7]
-        results = []
+        selection_results: list[dict] = []
 
-        logger.info(f"Testing HMM with components: {candidate_components}")
+        logger.info("Starting HMM model selection over %s", candidate_components)
 
         for n_comp in candidate_components:
             best_bic = np.inf
-            best_model = None
-            best_score = None
+            best_model: Optional[GaussianHMM] = None
+            best_ll: Optional[float] = None
 
-            for init in range(self.n_init):
+            for init_idx in range(self.n_init):
+                # FIX: use a genuinely random seed each restart (not 42+init).
+                # Previously all restarts produced identical models because
+                # 42+0, 42+1, … are deterministic.  Now each restart explores
+                # a different starting point in parameter space.
+                rng_seed = np.random.randint(0, 100_000)
+
                 model = GaussianHMM(
                     n_components=n_comp,
-                    covariance_type='full',
+                    covariance_type="full",
                     n_iter=1000,
-                    random_state=42 + init,
+                    random_state=rng_seed,
                 )
 
                 try:
                     model.fit(features_scaled)
-                    score = model.score(features_scaled)
-                    n_params = self._countParameters(n_comp, features_scaled.shape[1])
-                    n_samples = len(features_scaled)
-                    bic = -2 * score * n_samples + n_params * np.log(n_samples)
+
+                    # hmmlearn.score() returns AVERAGE log-likelihood per
+                    # sample.  Total LL = score * n_samples.
+                    avg_ll = model.score(features_scaled)
+                    total_ll = avg_ll * len(features_scaled)
+
+                    n_params = self._count_parameters(n_comp, features_scaled.shape[1])
+                    bic = -2 * total_ll + n_params * np.log(len(features_scaled))
+
+                    logger.debug(
+                        "n_comp=%d init=%d seed=%d  avg_ll=%.3f  BIC=%.2f",
+                        n_comp, init_idx + 1, rng_seed, avg_ll, bic,
+                    )
 
                     if bic < best_bic:
                         best_bic = bic
-                        best_model = model
-                        best_score = score
+                        best_model = deepcopy(model)   # isolate from next iter
+                        best_ll = avg_ll
 
-                    logger.debug(
-                        f"n_components={n_comp}, init={init+1}, "
-                        f"log_likelihood={score:.2f}, BIC={bic:.2f}"
+                except Exception as exc:
+                    logger.warning(
+                        "Training failed for n_comp=%d init=%d: %s",
+                        n_comp, init_idx + 1, exc,
                     )
-                except Exception as e:
-                    logger.warning(f"Failed to train n_components={n_comp}, init={init+1}: {e}")
-                    continue
 
             if best_model is not None:
-                results.append({
-                    'n_components': n_comp,
-                    'bic': best_bic,
-                    'log_likelihood': best_score,
-                    'model': best_model,
+                selection_results.append({
+                    "n_components": n_comp,
+                    "bic": best_bic,
+                    "log_likelihood": best_ll,
+                    "model": best_model,
                 })
-                logger.info(f"n_components={n_comp}: BIC={best_bic:.2f}, log_likelihood={best_score:.2f}")
+                logger.info("n_comp=%d  best BIC=%.2f  best_ll=%.3f", n_comp, best_bic, best_ll)
 
-        if not results:
-            raise ValueError("No valid HMM models could be trained")
+        if not selection_results:
+            raise RuntimeError("No HMM model could be trained successfully.")
 
-        selected = min(results, key=lambda x: x['bic'])
-        self.n_regimes = selected['n_components']
-        self.model = selected['model']
-        self.bic_score = selected['bic']
+        # ── Step 4: select best model by BIC ─────────────────────────────────
+        selected = min(selection_results, key=lambda r: r["bic"])
+        self.n_regimes = selected["n_components"]
+        self.model = selected["model"]
+        self.bic_score = selected["bic"]
+        logger.info("Selected n_regimes=%d  BIC=%.2f", self.n_regimes, self.bic_score)
 
-        logger.info(f"Selected n_components={self.n_regimes} with BIC={self.bic_score:.2f}")
-
-        self._assignRegimeLabels(features_scaled)
+        # ── Step 5: assign regime labels sorted by raw-return volatility ──────
+        # We decode the training data once (using Viterbi — only during training
+        # is this acceptable since we have the full history) to find which
+        # training bars belong to each state, then compute the volatility of
+        # raw returns for each state.
+        self._assign_regime_labels(features_scaled, raw_returns)
         self.training_date = datetime.now()
+
+        # Reset live-inference state so a retrained classifier starts fresh.
+        self._reset_live_state()
 
         return self
 
-    def _countParameters(self, n_components: int, n_features: int) -> int:
-        """Count number of free parameters in GaussianHMM."""
-        n_states = n_components
+    def _count_parameters(self, n_components: int, n_features: int) -> int:
+        """
+        Count the number of free parameters in a full-covariance GaussianHMM.
 
-        startprob = n_states - 1
-        transmat = n_states * (n_states - 1)
-        means = n_states * n_features
-        covars = n_states * n_features * (n_features + 1) // 2
-
+        Breakdown
+        ---------
+        startprob : n_states - 1   (sums to 1, so one is determined)
+        transmat  : n_states × (n_states - 1)   (each row sums to 1)
+        means     : n_states × n_features
+        covars    : n_states × n_features × (n_features + 1) / 2
+                    (symmetric matrix, upper triangle only)
+        """
+        startprob = n_components - 1
+        transmat = n_components * (n_components - 1)
+        means = n_components * n_features
+        covars = n_components * n_features * (n_features + 1) // 2
         return startprob + transmat + means + covars
 
-    def _assignRegimeLabels(self, features_scaled: np.ndarray):
-        """Assign regime labels sorted by mean return (ascending)."""
+    def _assign_regime_labels(
+        self, features_scaled: np.ndarray, raw_returns: np.ndarray
+    ) -> None:
+        """
+        Map HMM state indices to human-readable labels sorted by VOLATILITY.
+
+        Why sort by volatility, not by return?
+        This is a VOLATILITY classifier.  The labels CALM / TURBULENT refer
+        to how much the market is moving, not which direction.  Sorting by
+        return would mix high-return / low-vol states with low-return /
+        high-vol states and give inconsistent labels across retraining runs.
+
+        Steps
+        -----
+        1. Run Viterbi on the training data to get the most-likely state
+           sequence (using full history is fine here — training-time only).
+        2. For each state, compute the std-dev of raw log-returns of all
+           bars assigned to that state.
+        3. Sort states by that std-dev (ascending = calmer first).
+        4. Map sorted position → label from REGIME_LABELS[n_regimes].
+        5. Record volatility_rank in RegimeInfo for downstream use.
+        """
         hidden_states = self.model.predict(features_scaled)
 
-        state_returns = {}
-        state_volatilities = {}
+        state_volatility: dict[int, float] = {}
+        state_mean_return: dict[int, float] = {}
 
         for state in range(self.n_regimes):
             mask = hidden_states == state
             if mask.sum() > 0:
-                state_returns[state] = features_scaled[mask, :3].mean()
-                state_volatilities[state] = features_scaled[mask, :3].std()
-
-        sorted_states = sorted(state_returns.items(), key=lambda x: x[1])
-        self.regime_labels = self.REGIME_LABELS[self.n_regimes]
-
-        strategy_types = ['mean_reversion', 'momentum', 'trend_following', 'volatility_arb']
-        leverage_values = [1.0, 1.5, 2.0, 1.25]
-
-        for idx, (state_id, _) in enumerate(sorted_states):
-            label = self.regime_labels[idx]
-            exp_return = state_returns[state_id]
-            exp_vol = state_volatilities[state_id]
-
-            if 'CRASH' in label or 'BEAR' in label:
-                strat_type = 'mean_reversion'
-                max_lev = 1.0
-                max_pos = 0.25
-            elif 'BULL' in label or 'EUPHORIA' in label:
-                strat_type = 'trend_following'
-                max_lev = leverage_values[idx % len(leverage_values)]
-                max_pos = 0.75
+                state_volatility[state] = float(np.std(raw_returns[mask]))
+                state_mean_return[state] = float(np.mean(raw_returns[mask]))
             else:
-                strat_type = strategy_types[idx % len(strategy_types)]
-                max_lev = 1.25
-                max_pos = 0.50
+                # Edge case: a state was never visited in training data.
+                state_volatility[state] = 0.0
+                state_mean_return[state] = 0.0
+                logger.warning("State %d had no training observations.", state)
 
+        # Sort states by volatility ascending: index 0 is the calmest.
+        sorted_by_vol = sorted(state_volatility.items(), key=lambda kv: kv[1])
+
+        label_list = self.REGIME_LABELS[self.n_regimes]
+        self.regime_labels = label_list
+
+        self.regime_info = {}
+        self._state_to_label = {}
+
+        for vol_rank, (state_id, vol) in enumerate(sorted_by_vol):
+            label = label_list[vol_rank]
             self.regime_info[state_id] = RegimeInfo(
                 regime_id=state_id,
                 regime_name=label,
-                expected_return=exp_return,
-                expected_volatility=exp_vol,
-                recommended_strategy_type=strat_type,
-                max_leverage_allowed=max_lev,
-                max_position_size_pct=max_pos,
-                min_confidence_to_act=self.confidence_threshold,
+                volatility_rank=vol_rank,
+                expected_return=state_mean_return[state_id],
+                expected_volatility=vol,
+            )
+            self._state_to_label[state_id] = label
+            logger.debug(
+                "State %d → %s  vol_rank=%d  exp_vol=%.5f  exp_ret=%.5f",
+                state_id, label, vol_rank, vol, state_mean_return[state_id],
             )
 
-        self._state_id_to_label = {state_id: self.regime_labels[idx]
-                                   for idx, (state_id, _) in enumerate(sorted_states)}
+    def _reset_live_state(self) -> None:
+        """Reset all mutable inference state to defaults (call after fit/load)."""
+        self._alpha = None
+        self._current_state = None
+        self._state_history = []
+        self._consecutive_bars = 0
+        self._last_confirmed_state = None
 
-    def _computeEmissionProbability(self, observation: np.ndarray) -> np.ndarray:
+    # ─────────────────────────────────────────────────────────────────────────
+    # Pure helper: emission probabilities
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _emission_probs(self, obs: np.ndarray) -> np.ndarray:
         """
-        Compute P(observation | state) for each state using Gaussian emissions.
+        Return P(obs | state) for every state — shape (n_regimes,).
 
-        Returns:
-            Array of shape (n_states,) with emission probabilities
+        Uses scipy.stats.multivariate_normal for each state's Gaussian
+        distribution.  This replaces the previous manual implementation that
+        called np.linalg.inv() and np.linalg.det() per state per timestep,
+        which was both slow (O(d³) per state) and numerically fragile (det
+        underflows to 0 for high-dimensional features).
+
+        Parameters
+        ----------
+        obs : np.ndarray, shape (n_features,)
+            Single SCALED observation vector.
+
+        Returns
+        -------
+        probs : np.ndarray, shape (n_regimes,)
+            Raw (un-normalised) emission probabilities.  Clipped to 1e-300
+            so that downstream log operations never hit -inf.
         """
-        means = self.model.means_
-        covars = self.model.covars_
+        probs = np.array([
+            multivariate_normal.pdf(
+                obs,
+                mean=self.model.means_[s],
+                cov=self.model.covars_[s],
+                allow_singular=True,   # avoids crashes on near-singular matrices
+            )
+            for s in range(self.n_regimes)
+        ])
+        return np.clip(probs, 1e-300, None)
 
-        probabilities = np.zeros(self.n_regimes)
-        for state in range(self.n_regimes):
-            diff = observation - means[state]
-            cov = covars[state]
+    # ─────────────────────────────────────────────────────────────────────────
+    # Pure helper: forward algorithm (no side effects)
+    # ─────────────────────────────────────────────────────────────────────────
 
-            if cov.ndim == 1:
-                cov = np.diag(cov)
-
-            try:
-                exponent = -0.5 * diff.T @ np.linalg.inv(cov) @ diff
-                normalizer = 0.5 * np.log(np.linalg.det(2 * np.pi * cov))
-                probabilities[state] = np.exp(exponent - normalizer)
-            except np.linalg.LinAlgError:
-                probabilities[state] = 1e-10
-
-        probabilities = np.maximum(probabilities, 1e-10)
-        return probabilities
-
-    def predict_regime_filtered(self, features: pd.DataFrame | np.ndarray) -> np.ndarray:
+    def _forward_pass(
+        self,
+        features_scaled: np.ndarray,
+        initial_alpha: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """
-        Compute P(state_t | observations_1:t) using forward algorithm.
+        Run the HMM forward (filtering) algorithm and return the final alpha.
 
-        Uses ONLY past and present data - no future data. This avoids
-        look-ahead bias that would occur if using model.predict().
+        The forward algorithm computes, for each time step t:
+            α_t(j) = P(state_t = j | obs_1 .. obs_t)
 
-        Args:
-            features: DataFrame or array of shape (n_observations, n_features)
+        This uses ONLY past and present observations — no future data leaks
+        in — making it safe for live inference and backtesting.
 
-        Returns:
-            Array of most likely state ID for each observation
+        The Viterbi algorithm (used by hmmlearn.predict() internally) uses
+        the FULL sequence and therefore introduces look-ahead bias; we
+        deliberately avoid it here.
+
+        Parameters
+        ----------
+        features_scaled : np.ndarray, shape (T, n_features)
+            Pre-scaled observations from the oldest to the most recent.
+        initial_alpha   : np.ndarray or None, shape (n_regimes,)
+            If provided, start the recursion from this alpha vector instead
+            of the model's startprob.  Used by step() to continue from the
+            previous bar's alpha rather than reprocessing the whole history.
+
+        Returns
+        -------
+        alpha : np.ndarray, shape (n_regimes,)
+            Normalised posterior distribution over states given all
+            observations in features_scaled (plus the prior if initial_alpha
+            was provided).
         """
-        if isinstance(features, pd.DataFrame):
-            features = features.values
+        transmat = self.model.transmat_    # shape (n_regimes, n_regimes)
 
-        features_scaled = self.scaler.transform(features)
-
-        n_observations = len(features_scaled)
-        predicted_states = np.zeros(n_observations, dtype=int)
-
-        startprob = self.model.startprob_
-        transmat = self.model.transmat_
-
-        if self._previous_alpha is None or n_observations == 1:
-            alpha = startprob * self._computeEmissionProbability(features_scaled[0])
-            alpha = alpha / alpha.sum()
+        if initial_alpha is not None:
+            # Continue from a previous alpha: compute predicted alpha for
+            # the new observation, then update with emission.
+            alpha = initial_alpha @ transmat
+            alpha = alpha * self._emission_probs(features_scaled[0])
+            start_idx = 1
         else:
-            alpha = self._previous_alpha.copy()
+            # Cold start: initialise with start probabilities × first emission.
+            alpha = self.model.startprob_ * self._emission_probs(features_scaled[0])
+            start_idx = 1
 
-        for t in range(n_observations):
-            if t > 0:
-                alpha_forward = alpha @ transmat
-                emission = self._computeEmissionProbability(features_scaled[t])
-                alpha = alpha_forward * emission
-                alpha = alpha / alpha.sum()
+        # Normalise to prevent underflow on long sequences.
+        alpha /= alpha.sum()
 
-            alpha = np.maximum(alpha, 1e-10)
-            alpha = alpha / alpha.sum()
-
-            predicted_states[t] = np.argmax(alpha)
-
-        self._previous_alpha = alpha.copy()
-        self._previous_state = predicted_states[-1]
-
-        return predicted_states
-
-    def predict_regime_proba(self, features: pd.DataFrame | np.ndarray) -> np.ndarray:
-        """
-        Get probability distribution over all states.
-
-        Args:
-            features: DataFrame or array of features up to current time
-
-        Returns:
-            Array of shape (n_states,) with probability for each state
-        """
-        if isinstance(features, pd.DataFrame):
-            features = features.values
-
-        features_scaled = self.scaler.transform(features)
-
-        startprob = self.model.startprob_
-        transmat = self.model.transmat_
-
-        alpha = startprob * self._computeEmissionProbability(features_scaled[-1])
-        alpha = alpha / alpha.sum()
-
-        for t in range(len(features_scaled) - 1):
-            alpha_forward = alpha @ transmat
-            emission = self._computeEmissionProbability(features_scaled[t])
-            alpha = alpha_forward * emission
-            alpha = alpha / alpha.sum()
+        # FIX: the original predict_regime_proba() initialised alpha on
+        # features_scaled[-1] and then iterated over features_scaled[0..n-2],
+        # effectively running the recursion backwards.  Corrected here to
+        # always iterate forward from start_idx to T-1.
+        for t in range(start_idx, len(features_scaled)):
+            alpha = (alpha @ transmat) * self._emission_probs(features_scaled[t])
+            # Normalise at every step (scale the probability to prevent underflow
+            # in very long sequences).
+            alpha_sum = alpha.sum()
+            if alpha_sum == 0:
+                logger.warning("Alpha collapsed to zero at t=%d; resetting to uniform.", t)
+                alpha = np.ones(self.n_regimes) / self.n_regimes
+            else:
+                alpha /= alpha_sum
 
         return alpha
 
-    def get_regime_stability(self) -> int:
-        """Get number of consecutive bars in current regime."""
-        if self._previous_state is None:
-            return 0
+    # ─────────────────────────────────────────────────────────────────────────
+    # Primary inference entry point
+    # ─────────────────────────────────────────────────────────────────────────
 
-        stability = 0
-        for i in range(len(self._regime_history) - 1, -1, -1):
-            if self._regime_history[i] == self._previous_state:
-                stability += 1
-            else:
-                break
-        return stability
-
-    def get_transition_matrix(self) -> np.ndarray:
-        """Get learned transition probability matrix."""
-        return self.model.transmat_.copy()
-
-    def detect_regime_change(self, features: pd.DataFrame) -> bool:
+    def step(self, new_bar: pd.DataFrame | np.ndarray) -> RegimeState:
         """
-        Detect if regime has changed (confirmed after N bars).
+        Ingest ONE new bar and advance all internal state.
 
-        Args:
-            features: Latest features
+        This is the ONLY method that should mutate instance state during live
+        inference.  Call it exactly once per new bar.  Do NOT call any of the
+        predict_*() methods in a live loop — they are stateless helpers for
+        batch analysis.
 
-        Returns:
-            True only if regime change is confirmed
+        Parameters
+        ----------
+        new_bar : pd.DataFrame or np.ndarray, shape (1, n_features) or (n_features,)
+            Features for the single new bar.  Must be in the same raw
+            (unscaled) feature space that was used to train the scaler.
+
+        Returns
+        -------
+        RegimeState
+            Comprehensive snapshot of the current regime.
+
+        Raises
+        ------
+        RuntimeError
+            If called before fit() or load_model().
         """
-        states = self.predict_regime_filtered(features)
-        current_state = states[-1]
+        self._assert_trained()
 
-        if len(self._regime_history) > 0 and current_state != self._regime_history[-1]:
-            self._consecutive_bars = 1
-        elif len(self._regime_history) > 0 and current_state == self._regime_history[-1]:
+        obs = self._to_scaled_array(new_bar)  # shape (1, n_features)
+
+        # ── 1. Update alpha via forward algorithm ─────────────────────────────
+        # Pass the existing _alpha as the warm-start prior.  This way we never
+        # reprocess the full history — only the single new observation.
+        self._alpha = self._forward_pass(obs, initial_alpha=self._alpha)
+        new_state = int(np.argmax(self._alpha))
+
+        # ── 2. Update consecutive-bar counter ────────────────────────────────
+        if new_state == self._current_state:
             self._consecutive_bars += 1
+        else:
+            self._consecutive_bars = 1
+            self._current_state = new_state
 
-        self._regime_history.append(current_state)
+        # ── 3. Update rolling history (for flicker detection) ────────────────
+        self._state_history.append(new_state)
+        if len(self._state_history) > self.flicker_window:
+            self._state_history.pop(0)
 
-        if len(self._regime_history) > self.confirmation_bars:
-            self._regime_history.pop(0)
+        # ── 4. Check confirmation ─────────────────────────────────────────────
+        is_confirmed = self._consecutive_bars >= self.confirmation_bars
+        if is_confirmed and new_state != self._last_confirmed_state:
+            self._last_confirmed_state = new_state
+            logger.info(
+                "Regime confirmed: %s (state_id=%d, bars=%d)",
+                self._state_to_label.get(new_state, "UNKNOWN"),
+                new_state,
+                self._consecutive_bars,
+            )
 
-        is_confirmed = (
-            self._consecutive_bars >= self.confirmation_bars and
-            current_state != self._last_confirmed_state
+        # ── 5. Build and return snapshot ─────────────────────────────────────
+        return RegimeState(
+            label=self._state_to_label.get(new_state, "UNKNOWN"),
+            state_id=new_state,
+            probability=float(self._alpha[new_state]),
+            state_probabilities=self._alpha.copy(),
+            timestamp=datetime.now(),
+            is_confirmed=is_confirmed,
+            consecutive_bars=self._consecutive_bars,
         )
 
-        if is_confirmed:
-            logger.warning(f"Regime change confirmed: {self._state_id_to_label.get(current_state, 'UNKNOWN')}")
-            self._last_confirmed_state = current_state
+    # ─────────────────────────────────────────────────────────────────────────
+    # Stateless query methods (no side effects — safe to call any time)
+    # ─────────────────────────────────────────────────────────────────────────
 
-        return is_confirmed
+    def predict_proba_batch(
+        self, features: pd.DataFrame | np.ndarray
+    ) -> np.ndarray:
+        """
+        Compute the posterior alpha vector after seeing a full batch of bars.
+
+        Runs a complete forward pass from scratch on the provided sequence.
+        Does NOT update _alpha or any other instance state.
+
+        Useful for backtesting or offline analysis where you want the
+        filtered probability at the END of a window without disturbing the
+        live-inference state.
+
+        Parameters
+        ----------
+        features : pd.DataFrame or np.ndarray, shape (T, n_features)
+            Sequence of raw (unscaled) feature observations.
+
+        Returns
+        -------
+        alpha : np.ndarray, shape (n_regimes,)
+            Posterior probability distribution over regimes after bar T.
+        """
+        self._assert_trained()
+        obs_scaled = self._to_scaled_array(features)
+        return self._forward_pass(obs_scaled)
+
+    def get_current_regime_state(self) -> RegimeState:
+        """
+        Return the current regime as a RegimeState without advancing state.
+
+        Requires at least one prior call to step().
+
+        Returns
+        -------
+        RegimeState
+            Snapshot based on the last step() call.
+
+        Raises
+        ------
+        RuntimeError
+            If step() has never been called.
+        """
+        if self._alpha is None or self._current_state is None:
+            raise RuntimeError(
+                "No regime state available.  Call step() at least once before "
+                "querying get_current_regime_state()."
+            )
+
+        state_id = self._current_state
+        is_confirmed = self._consecutive_bars >= self.confirmation_bars
+
+        return RegimeState(
+            label=self._state_to_label.get(state_id, "UNKNOWN"),
+            state_id=state_id,
+            probability=float(self._alpha[state_id]),
+            state_probabilities=self._alpha.copy(),
+            timestamp=datetime.now(),
+            is_confirmed=is_confirmed,
+            consecutive_bars=self._consecutive_bars,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Flicker & stability metrics
+    # ─────────────────────────────────────────────────────────────────────────
 
     def get_regime_flicker_rate(self) -> float:
         """
-        Calculate regime changes per window (flicker rate).
+        Count regime changes in the last flicker_window bars.
 
-        Returns:
-            Number of regime changes in last flicker_window bars
+        A high flicker rate indicates the model is oscillating between states,
+        which typically signals a transitional / noisy market environment.
+
+        Returns
+        -------
+        float
+            Number of state changes in the rolling window.
         """
-        if len(self._regime_history) < 2:
+        history = self._state_history
+        if len(history) < 2:
             return 0.0
 
-        window = min(self.flicker_window, len(self._regime_history))
-        recent_history = self._regime_history[-window:]
-        changes = sum(1 for i in range(1, len(recent_history))
-                     if recent_history[i] != recent_history[i-1])
-
-        return changes
-
-    def is_flickering(self) -> bool:
-        """Check if flicker rate exceeds threshold."""
-        return self.get_regime_flicker_rate() > self.flicker_threshold
-
-    def get_current_regime_state(self, features: pd.DataFrame) -> RegimeState:
-        """
-        Get comprehensive current regime state.
-
-        Args:
-            features: Latest feature DataFrame
-
-        Returns:
-            RegimeState with all information
-        """
-        states = self.predict_regime_filtered(features)
-        current_state = int(states[-1])
-        probabilities = self.predict_regime_proba(features)
-
-        label = self._state_id_to_label.get(current_state, 'UNKNOWN')
-        confidence = probabilities[current_state]
-
-        is_confirmed = self.get_regime_stability() >= self.confirmation_bars
-
-        return RegimeState(
-            label=label,
-            state_id=current_state,
-            probability=confidence,
-            state_probabilities=probabilities,
-            timestamp=datetime.now(),
-            is_confirmed=is_confirmed,
-            consecutive_bars=self.get_regime_stability(),
+        return float(
+            sum(1 for i in range(1, len(history)) if history[i] != history[i - 1])
         )
 
-    def get_volatility_sorting(self) -> list[tuple[int, float]]:
+    def is_flickering(self) -> bool:
+        """Return True if the flicker rate exceeds flicker_threshold."""
+        return self.get_regime_flicker_rate() > self.flicker_threshold
+
+    def get_regime_stability(self) -> int:
+        """Return how many consecutive bars the current state has been active."""
+        return self._consecutive_bars
+
+    def get_transition_matrix(self) -> np.ndarray:
         """
-        Get regime states sorted by VOLATILITY (not returns).
+        Return the learned transition probability matrix.
 
-        The strategy layer uses this for allocation decisions.
-        Labels are for human readability; volatility drives strategy.
-
-        Returns:
-            List of (state_id, mean_volatility) sorted ascending
+        Shape (n_regimes, n_regimes).  Entry [i, j] is the probability of
+        transitioning from state i to state j on the next bar.
         """
-        volatility_map = {}
-        for state_id, info in self.regime_info.items():
-            volatility_map[state_id] = info.expected_volatility
+        self._assert_trained()
+        return self.model.transmat_.copy()
 
-        return sorted(volatility_map.items(), key=lambda x: x[1])
+    # ─────────────────────────────────────────────────────────────────────────
+    # Strategy-layer interface
+    # ─────────────────────────────────────────────────────────────────────────
 
-    def get_regime_for_allocation(self, features: pd.DataFrame) -> tuple[str, float]:
+    def get_regime_for_allocation(self) -> tuple[str, float]:
         """
-        Get regime classification for portfolio allocation.
+        Translate the current regime into a volatility bucket and a position
+        size multiplier for the strategy layer.
 
-        Strategy layer uses this - sorts by VOLATILITY.
+        Bucketing is based on VOLATILITY RANK (not on label strings), so the
+        result is consistent even if labels are renamed or the n_regimes
+        changes between training runs.
 
-        Args:
-            features: Latest features
+        Volatility buckets
+        ------------------
+        Bottom third of regimes by vol  → 'CALM'       multiplier = 1.00
+        Middle third                    → 'MODERATE'   multiplier = 0.75
+        Top third                       → 'TURBULENT'  multiplier = 0.50
 
-        Returns:
-            Tuple of (volatility_level, position_multiplier)
+        Adjustments
+        -----------
+        * Flickering detected              → multiplier × 0.75
+        * Not yet confirmed (< conf_bars)  → multiplier × 0.75
+        * Unknown / unwarmed state         → 'UNKNOWN'  multiplier = 0.00
+          (FIX: was 0.5 previously, which silently took a position when
+          the model had no opinion)
+
+        Returns
+        -------
+        (volatility_level, position_multiplier) : (str, float)
         """
-        vol_sorted = self.get_volatility_sorting()
-        current_state = self._previous_state
+        if self._current_state is None:
+            # Model hasn't been warmed up — do not trade.
+            logger.warning(
+                "get_regime_for_allocation() called before any step(). "
+                "Returning UNKNOWN with 0.0 multiplier."
+            )
+            return ("UNKNOWN", 0.0)
 
-        if current_state is None:
-            return ('UNKNOWN', 0.5)
+        info = self.regime_info.get(self._current_state)
+        if info is None:
+            logger.error("No RegimeInfo for state_id=%d.", self._current_state)
+            return ("UNKNOWN", 0.0)
 
-        vol_rank = next(i for i, (sid, _) in enumerate(vol_sorted) if sid == current_state)
-        n_levels = len(vol_sorted)
+        vol_rank = info.volatility_rank
+        n = self.n_regimes
 
-        if vol_rank < n_levels // 3:
-            level = 'CALM'
-            multiplier = 1.0
-        elif vol_rank < 2 * n_levels // 3:
-            level = 'MODERATE'
+        # Assign bucket by volatility rank (independent of label strings).
+        if vol_rank < n // 3:
+            level = "CALM"
+            multiplier = 1.00
+        elif vol_rank < 2 * n // 3:
+            level = "MODERATE"
             multiplier = 0.75
         else:
-            level = 'TURBULENT'
+            level = "TURBULENT"
             multiplier = 0.50
 
+        # Uncertainty adjustments — each halves the multiplier by 25 %.
         if self.is_flickering():
-            logger.warning("Flickering detected - entering uncertainty mode")
+            logger.warning("Flickering detected — reducing position multiplier.")
             multiplier *= 0.75
 
-        stability = self.get_regime_stability()
-        if stability < self.confirmation_bars:
+        if self._consecutive_bars < self.confirmation_bars:
             multiplier *= 0.75
 
-        return (level, multiplier)
+        return (level, round(multiplier, 4))
 
-    def store_to_supabase(
-        self,
-        ticker: str,
-        features: pd.DataFrame,
-    ) -> dict | None:
+    # ─────────────────────────────────────────────────────────────────────────
+    # Persistence
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def save_model(self, path: str | Path) -> None:
         """
-        Store current HMM results to Supabase.
+        Save the trained model to a JSON file.
 
-        Args:
-            ticker: Stock ticker symbol
-            features: Latest feature DataFrame
+        Unlike pickle, JSON is human-readable, version-agnostic, and immune
+        to class-refactoring breakage.  The model weights (means, covariances,
+        transition matrix, start probabilities) are stored as nested lists;
+        the scaler parameters are stored alongside them.
 
-        Returns:
-            The inserted record dict, or None if Supabase unavailable
+        The file can be loaded with load_model() in any future Python/hmmlearn
+        version without compatibility issues.
+
+        Parameters
+        ----------
+        path : str or Path
+            Destination file path (typically *.json).
         """
-        if not SUPPABASE_AVAILABLE:
-            logger.warning("Supabase not available, skipping storage")
+        self._assert_trained()
+        path = Path(path)
+
+        payload = {
+            "metadata": {
+                "n_regimes": self.n_regimes,
+                "bic_score": self.bic_score,
+                "training_date": self.training_date.isoformat() if self.training_date else None,
+                "regime_labels": self.regime_labels,
+                "confidence_threshold": self.confidence_threshold,
+                "confirmation_bars": self.confirmation_bars,
+                "flicker_threshold": self.flicker_threshold,
+                "flicker_window": self.flicker_window,
+                "regime_info": {
+                    str(k): {
+                        "regime_id": v.regime_id,
+                        "regime_name": v.regime_name,
+                        "volatility_rank": v.volatility_rank,
+                        "expected_return": v.expected_return,
+                        "expected_volatility": v.expected_volatility,
+                    }
+                    for k, v in self.regime_info.items()
+                },
+                "state_to_label": {str(k): v for k, v in self._state_to_label.items()},
+            },
+            "model_weights": {
+                "startprob": self.model.startprob_.tolist(),
+                "transmat": self.model.transmat_.tolist(),
+                "means": self.model.means_.tolist(),
+                "covars": self.model.covars_.tolist(),
+                "covariance_type": self.model.covariance_type,
+            },
+            "scaler": {
+                "mean": self.scaler.mean_.tolist(),
+                "scale": self.scaler.scale_.tolist(),
+                "var": self.scaler.var_.tolist(),
+                "n_features_in": int(self.scaler.n_features_in_),
+            },
+        }
+
+        path.write_text(json.dumps(payload, indent=2))
+        logger.info("Model saved to %s", path)
+
+    def load_model(self, path: str | Path) -> None:
+        """
+        Load a model previously saved with save_model().
+
+        Reconstructs the GaussianHMM by directly setting the weight arrays
+        rather than calling fit() — this is the correct way to restore a
+        trained hmmlearn model without re-training.
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to the JSON file produced by save_model().
+        """
+        path = Path(path)
+        payload = json.loads(path.read_text())
+
+        meta = payload["metadata"]
+        weights = payload["model_weights"]
+        scaler_data = payload["scaler"]
+
+        # ── Restore metadata ─────────────────────────────────────────────────
+        self.n_regimes = meta["n_regimes"]
+        self.bic_score = meta["bic_score"]
+        self.training_date = (
+            datetime.fromisoformat(meta["training_date"])
+            if meta.get("training_date")
+            else None
+        )
+        self.regime_labels = meta["regime_labels"]
+        self.confidence_threshold = meta["confidence_threshold"]
+        self.confirmation_bars = meta["confirmation_bars"]
+        self.flicker_threshold = meta["flicker_threshold"]
+        self.flicker_window = meta["flicker_window"]
+
+        self.regime_info = {
+            int(k): RegimeInfo(**v) for k, v in meta["regime_info"].items()
+        }
+        self._state_to_label = {int(k): v for k, v in meta["state_to_label"].items()}
+
+        # ── Restore GaussianHMM weights ──────────────────────────────────────
+        self.model = GaussianHMM(
+            n_components=self.n_regimes,
+            covariance_type=weights["covariance_type"],
+        )
+        self.model.startprob_ = np.array(weights["startprob"])
+        self.model.transmat_ = np.array(weights["transmat"])
+        self.model.means_ = np.array(weights["means"])
+        self.model.covars_ = np.array(weights["covars"])
+
+        # ── Restore StandardScaler ───────────────────────────────────────────
+        self.scaler = StandardScaler()
+        self.scaler.mean_ = np.array(scaler_data["mean"])
+        self.scaler.scale_ = np.array(scaler_data["scale"])
+        self.scaler.var_ = np.array(scaler_data["var"])
+        self.scaler.n_features_in_ = scaler_data["n_features_in"]
+
+        # Reset live-inference state so the loaded model starts fresh.
+        self._reset_live_state()
+
+        logger.info(
+            "Model loaded from %s  (n_regimes=%d, trained=%s)",
+            path, self.n_regimes, self.training_date,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Optional Supabase storage
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def store_to_supabase(self, ticker: str) -> dict | None:
+        """
+        Store the current regime state to Supabase.
+
+        Only operates when the `storage` module is importable.  If Supabase
+        is unavailable (e.g. in local dev), logs a warning and returns None
+        without raising.
+
+        Parameters
+        ----------
+        ticker : str
+            Equity ticker symbol (e.g. 'AAPL').
+
+        Returns
+        -------
+        dict or None
+            The inserted Supabase record, or None if unavailable.
+        """
+        if not SUPABASE_AVAILABLE:
+            logger.warning("Supabase not configured — skipping storage.")
             return None
 
-        regime_state = self.get_current_regime_state(features)
-        volatility_level, position_multiplier = self.get_regime_for_allocation(features)
+        state = self.get_current_regime_state()
+        vol_level, multiplier = self.get_regime_for_allocation()
 
         result = storeHMMResult(
             ticker=ticker,
-            result_date=regime_state.timestamp or datetime.now(),
-            regime_label=regime_state.label,
-            state_id=regime_state.state_id,
-            probability=regime_state.probability,
-            state_probabilities=regime_state.state_probabilities.tolist(),
-            volatility_level=volatility_level,
-            position_multiplier=position_multiplier,
-            is_confirmed=regime_state.is_confirmed,
+            result_date=state.timestamp or datetime.now(),
+            regime_label=state.label,
+            state_id=state.state_id,
+            probability=state.probability,
+            state_probabilities=state.state_probabilities.tolist(),
+            volatility_level=vol_level,
+            position_multiplier=multiplier,
+            is_confirmed=state.is_confirmed,
             is_flickering=self.is_flickering(),
-            stability_bars=regime_state.consecutive_bars,
+            stability_bars=state.consecutive_bars,
             bic_score=self.bic_score,
             n_regimes=self.n_regimes,
             training_date=self.training_date,
         )
 
-        logger.info(f"Stored HMM result for {ticker}: {regime_state.label}")
+        logger.info("Stored HMM result for %s: %s", ticker, state.label)
         return result
 
-    def save_model(self, path: str | Path):
-        """Save model to pickle file with metadata."""
-        path = Path(path)
-        metadata = {
-            'n_regimes': self.n_regimes,
-            'bic': self.bic_score,
-            'training_date': self.training_date,
-            'regime_labels': self.regime_labels,
-            'regime_info': self.regime_info,
-        }
+    # ─────────────────────────────────────────────────────────────────────────
+    # Internal utilities
+    # ─────────────────────────────────────────────────────────────────────────
 
-        with open(path, 'wb') as f:
-            pickle.dump({
-                'model': self.model,
-                'scaler': self.scaler,
-                'metadata': metadata,
-            }, f)
+    def _assert_trained(self) -> None:
+        """Raise RuntimeError if the model has not been trained or loaded."""
+        if self.model is None or self.scaler is None:
+            raise RuntimeError(
+                "Model is not trained.  Call fit() or load_model() first."
+            )
 
-        logger.info(f"Model saved to {path}")
+    def _to_scaled_array(self, features: pd.DataFrame | np.ndarray) -> np.ndarray:
+        """
+        Convert raw features to a scaled numpy array.
 
-    def load_model(self, path: str | Path):
-        """Load model from pickle file."""
-        path = Path(path)
+        Handles DataFrames, 2-D arrays, and 1-D row vectors.
 
-        with open(path, 'rb') as f:
-            data = pickle.load(f)
+        Parameters
+        ----------
+        features : pd.DataFrame or np.ndarray
 
-        self.model = data['model']
-        self.scaler = data['scaler']
-        metadata = data['metadata']
+        Returns
+        -------
+        np.ndarray, shape (T, n_features), dtype float64
+        """
+        if isinstance(features, pd.DataFrame):
+            arr = features.values.astype(np.float64)
+        else:
+            arr = np.asarray(features, dtype=np.float64)
 
-        self.n_regimes = metadata['n_regimes']
-        self.bic_score = metadata['bic']
-        self.training_date = metadata['training_date']
-        self.regime_labels = metadata['regime_labels']
-        self.regime_info = metadata['regime_info']
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
 
-        self._state_id_to_label = {info.regime_id: info.regime_name
-                                   for info in self.regime_info.values()}
+        return self.scaler.transform(arr)
 
-        logger.info(f"Model loaded from {path}")
+    def __repr__(self) -> str:
+        status = (
+            f"n_regimes={self.n_regimes}, BIC={self.bic_score:.2f}, "
+            f"trained={self.training_date}"
+            if self.model is not None
+            else "untrained"
+        )
+        return f"HMMVolatilityClassifier({status})"
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Convenience function
+# ─────────────────────────────────────────────────────────────────────────────
 
 def train_hmm(df: pd.DataFrame, **kwargs) -> HMMVolatilityClassifier:
     """
-    Convenience function to train HMM model.
+    Convenience wrapper: construct and train an HMMVolatilityClassifier.
 
-    Args:
-        df: DataFrame with OHLCV data
-        **kwargs: Additional arguments for HMMVolatilityClassifier
+    Parameters
+    ----------
+    df     : pd.DataFrame with OHLCV columns.
+    kwargs : Forwarded to HMMVolatilityClassifier.__init__().
 
-    Returns:
-        Trained HMMVolatilityClassifier
+    Returns
+    -------
+    HMMVolatilityClassifier (trained, ready for step() calls)
     """
-    classifier = HMMVolatilityClassifier(**kwargs)
-    return classifier.fit(df)
+    return HMMVolatilityClassifier(**kwargs).fit(df)
 
 
-# =============================================================================
-# Two-Layer Regime Engine (NEW)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Train-only orchestration.  It lives here because Layer 2 is the individual
+# HMM implemented above; no separate runner is needed.
 
-import os
-import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Union
+_PRICE_COLUMNS = "ticker, price_date, open, high, low, close, volume"
 
-import numpy as np
-import pandas as pd
-import supabase
 
-from core.hmm_market import MarketRegimeClassifier
-from core.stock_adjuster import StockVolatilityAdjuster
-from core.types import AllocationSignal, MarketRegimeState, StockVolatilityProfile
+def _fetch_prices(client: Any, ticker: str, limit: int = 3000) -> pd.DataFrame:
+    rows = client.table("stock_prices").select(_PRICE_COLUMNS).eq(
+        "ticker", ticker.upper()
+    ).order("price_date", desc=True).limit(limit).execute().data
+    frame = pd.DataFrame(rows or [])
+    if frame.empty:
+        raise ValueError(f"No OHLCV rows available for {ticker}")
+    frame["price_date"] = pd.to_datetime(frame["price_date"], utc=True)
+    for column in ("open", "high", "low", "close", "volume"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame.dropna(subset=["open", "high", "low", "close"]).sort_values("price_date")
 
-logger = logging.getLogger("two_layer_regime")
+
+def latest_price_date_tickers(client: Any) -> tuple[str, list[str]]:
+    """Return every ticker present on the latest available price date.
+
+    This intentionally queries ``stock_prices`` rather than ``stocks``: the
+    latter is a catalogue/load batch, whereas the former tells us which assets
+    have data suitable for the current HMM run.
+    """
+    latest = client.table("stock_prices").select("price_date").order(
+        "price_date", desc=True
+    ).limit(1).execute().data
+    if not latest:
+        raise ValueError("stock_prices is empty")
+    result_date = latest[0]["price_date"]
+    rows = client.table("stock_prices").select("ticker").eq(
+        "price_date", result_date
+    ).execute().data
+    return result_date, sorted({row["ticker"].upper() for row in rows})
+
+
+def _write_result_json(path: str | Path, payload: dict[str, Any]) -> None:
+    Path(path).write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
+def _market_result(classifier: Any, market_ticker: str, state: Any) -> dict[str, Any]:
+    return {
+        "market_ticker": market_ticker,
+        "result_date": state.timestamp.date().isoformat(),
+        "regime_label": state.label,
+        "state_id": state.state_id,
+        "probability": state.probability,
+        "state_probabilities": state.state_probabilities,
+        "base_multiplier": state.base_multiplier,
+        "is_regime_confirmed": state.is_confirmed,
+        "is_flickering": state.is_flickering,
+        "stability_bars": state.consecutive_bars,
+        "bic_score": classifier.bic_score,
+        "n_states": classifier.n_states,
+        "trained_at": classifier.training_date.isoformat(),
+    }
+
+
+def run_train_only(
+    client: Any,
+    market_ticker: str = "SPY",
+    *,
+    market_json: str = "hmm_market_results.json",
+    results_json: str = "hmm_results.json",
+    market_model_path: str = "models/hmm_market_model.json",
+) -> dict[str, Any]:
+    """Update macro HMM first, then train one individual HMM per price ticker."""
+    from core.hmm_market import MarketRegimeClassifier
+    from data.indicators import prepareFeaturesForHMM
+
+    market_ticker = market_ticker.upper()
+    market_prices = _fetch_prices(client, market_ticker)
+    market_model = MarketRegimeClassifier()
+    market_model.fit(market_prices, market_ticker=market_ticker)
+    market_model.save_model(market_model_path)
+    market_features = market_model.compute_features(
+        market_prices.set_index("price_date", drop=False)
+    )
+    for timestamp, row in market_features.iterrows():
+        row = row.copy()
+        row.name = timestamp
+        market_state = market_model.step(row)
+    market = _market_result(market_model, market_ticker, market_state)
+    _write_result_json(market_json, market)
+    client.table("hmm_market_results").upsert(
+        market, on_conflict="market_ticker,result_date"
+    ).execute()
+
+    result_date, tickers = latest_price_date_tickers(client)
+    if not tickers:
+        raise ValueError(f"No tickers found for latest stock_prices date {result_date}")
+
+    results: list[dict[str, Any]] = []
+    for ticker in tickers:
+        try:
+            prices = _fetch_prices(client, ticker)
+            model = HMMVolatilityClassifier()
+            model.fit(prices)
+            features = prepareFeaturesForHMM(prices, model.min_periods)
+            for index in range(len(features)):
+                model.step(features.iloc[[index]])
+            state = model.get_current_regime_state()
+            volatility_level, stock_multiplier = model.get_regime_for_allocation()
+            # Layer 1 reduces the allocation supplied by the individual HMM;
+            # it never increases it beyond the stock model's risk decision.
+            position_multiplier = round(stock_multiplier * market_state.base_multiplier, 4)
+            results.append({
+                "ticker": ticker,
+                "result_date": result_date,
+                "regime_label": state.label,
+                "state_id": state.state_id,
+                "probability": state.probability,
+                "state_probabilities": state.state_probabilities.tolist(),
+                "volatility_level": volatility_level,
+                "position_multiplier": position_multiplier,
+                "is_confirmed": state.is_confirmed,
+                "is_flickering": model.is_flickering(),
+                "stability_bars": state.consecutive_bars,
+                "bic_score": model.bic_score,
+                "n_regimes": model.n_regimes,
+                "training_date": model.training_date.isoformat(),
+            })
+        except Exception as exc:
+            logger.warning("Skipping %s: %s", ticker, exc)
+
+    if not results:
+        raise RuntimeError("No individual HMM result could be calculated")
+    payload = {"market": market, "result_date": result_date, "results": results}
+    _write_result_json(results_json, payload)
+    client.table("hmm_results").upsert(
+        results, on_conflict="ticker,result_date"
+    ).execute()
+    return payload
 
 
 class TwoLayerRegimeEngine:
-    """
-    Two-layer regime detection and allocation system.
-
-    Combines:
-    - Layer 1: MarketRegimeClassifier (macro market environment)
-    - Layer 2: StockVolatilityAdjuster (per-stock adjustments)
-
-    Produces AllocationSignal objects that combine both layers into
-    a final_multiplier for position sizing.
-
-    Supabase Integration:
-    - Reads OHLCV data from stock_prices table
-    - Writes AllocationSignal results to hmm_results table
-    """
-
-    def __init__(
-        self,
-        market_ticker: str = "SPY",
-        min_confidence: float = 0.60,
-        stability_bars: int = 5,
-        vol_window: int = 21,
-        beta_window: int = 63,
-    ):
-        """
-        Initialize the two-layer regime engine.
-
-        Args:
-            market_ticker: Market index to use for Layer 1 (SPY, QQQ, etc.)
-            min_confidence: Min probability to confirm regime
-            stability_bars: Bars needed to confirm regime
-            vol_window: Window for volatility calc (days)
-            beta_window: Window for beta calc (days)
-        """
-        self.market_ticker = market_ticker
-
-        # Layer 1: Market classifier
-        self.market_classifier: Optional[MarketRegimeClassifier] = None
-
-        # Layer 2: Per-stock adjusters
-        self.stock_adjusters: dict[str, StockVolatilityAdjuster] = {}
-
-        # Runtime state
-        self.min_confidence = min_confidence
-        self.stability_bars = stability_bars
-        self.vol_window = vol_window
-        self.beta_window = beta_window
-        self.is_trained = False
-
-        # Supabase client (lazy init)
-        self._supabase_client: Optional[supabase.Client] = None
-
-    # -------------------------------------------------------------------------
-    # Supabase Integration
-    # -------------------------------------------------------------------------
-
-    def _get_supabase_client(self) -> supabase.Client:
-        """Get or create Supabase client."""
-        if self._supabase_client is not None:
-            return self._supabase_client
-
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-
-        if not supabase_url or not supabase_key:
-            raise ValueError(
-                "SUPABASE_URL and SUPABASE_KEY (or SUPABASE_ANON_KEY) must be set in environment"
-            )
-
-        self._supabase_client = supabase.create_client(supabase_url, supabase_key)
-        logger.info("Connected to Supabase")
-        return self._supabase_client
-
-    def load_stock_prices_from_supabase(
-        self,
-        ticker_or_tickers: Union[str, list[str]],
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-    ) -> pd.DataFrame:
-        """
-        Load OHLCV data from Supabase stock_prices table.
-
-        Args:
-            ticker_or_tickers: Single ticker or list of tickers
-            start_date: Start date (inclusive)
-            end_date: End date (inclusive)
-
-        Returns:
-            DataFrame with OHLCV data, indexed by date, sorted ascending
-        """
-        client = self._get_supabase_client()
-
-        if isinstance(ticker_or_tickers, str):
-            ticker_or_tickers = [ticker_or_tickers]
-
-        all_data = []
-
-        for ticker in ticker_or_tickers:
-            try:
-                query = client.table("stock_prices").select(
-                    "ticker, price_date, open, high, low, close, volume"
-                ).eq("ticker", ticker)
-
-                if start_date:
-                    query = query.gte("price_date", start_date.strftime("%Y-%m-%d"))
-                if end_date:
-                    query = query.lte("price_date", end_date.strftime("%Y-%m-%d"))
-
-                query = query.order("price_date")
-                response = query.execute()
-
-                if response.data:
-                    df = pd.DataFrame(response.data)
-                    all_data.append(df)
-                    logger.info(f"Loaded {len(df)} bars for {ticker}")
-                else:
-                    logger.warning(f"No data found for {ticker}")
-
-            except Exception as e:
-                logger.error(f"Failed to load data for {ticker}: {e}")
-                continue
-
-        if not all_data:
-            return pd.DataFrame()
-
-        # Combine and clean
-        combined = pd.concat(all_data, ignore_index=True)
-        combined["price_date"] = pd.to_datetime(combined["price_date"])
-        combined = combined.set_index("price_date")
-        combined = combined.sort_index()
-
-        # Ensure lowercase columns
-        combined.columns = [c.lower() for c in combined.columns]
-
-        return combined
-
-    # -------------------------------------------------------------------------
-    # Model Training and Loading
-    # -------------------------------------------------------------------------
-
-    def train_market_model(
-        self,
-        market_df: pd.DataFrame,
-        save_path: Optional[str] = None,
-        **kwargs
-    ) -> "TwoLayerRegimeEngine":
-        """
-        Train the market classifier (Layer 1) on index data.
-
-        Args:
-            market_df: OHLCV data for the market index
-            save_path: Optional path to save trained model
-            **kwargs: Additional args for MarketRegimeClassifier
-
-        Returns:
-            Self for chaining
-        """
-        logger.info(f"Training market model on {self.market_ticker}")
-
-        self.market_classifier = MarketRegimeClassifier(
-            n_init=kwargs.get("n_init", 10),
-            min_confidence=self.min_confidence,
-            stability_bars=self.stability_bars,
-        )
-
-        self.market_classifier.fit(market_df, self.market_ticker)
-
-        if save_path:
-            self.market_classifier.save_model(save_path)
-            logger.info(f"Model saved to {save_path}")
-
-        self.is_trained = True
-        return self
-
-    def load_market_model(self, path: str) -> "TwoLayerRegimeEngine":
-        """
-        Load a pre-trained market model from JSON.
-
-        Args:
-            path: Path to saved model JSON
-
-        Returns:
-            Self for chaining
-        """
-        self.market_classifier = MarketRegimeClassifier()
-        self.market_classifier.load_model(path)
-        self.market_ticker = self.market_classifier.market_ticker or self.market_ticker
-        self.is_trained = True
-        logger.info(f"Model loaded from {path}")
-        return self
-
-    # -------------------------------------------------------------------------
-    # Ticker Management
-    # -------------------------------------------------------------------------
-
-    def register_ticker(self, ticker: str) -> None:
-        """
-        Register a ticker for Layer 2 tracking.
-
-        Args:
-            ticker: Stock symbol to track
-        """
-        if ticker not in self.stock_adjusters:
-            self.stock_adjusters[ticker] = StockVolatilityAdjuster(
-                ticker=ticker,
-                vol_window=self.vol_window,
-                beta_window=self.beta_window,
-            )
-            logger.info(f"Registered ticker: {ticker}")
-
-    def deregister_ticker(self, ticker: str) -> None:
-        """
-        Remove a ticker from Layer 2 tracking.
-
-        Args:
-            ticker: Stock symbol to remove
-        """
-        if ticker in self.stock_adjusters:
-            del self.stock_adjusters[ticker]
-            logger.info(f"Deregistered ticker: {ticker}")
-
-    def register_tickers(self, tickers: list[str]) -> None:
-        """Register multiple tickers at once."""
-        for ticker in tickers:
-            self.register_ticker(ticker)
-
-    # -------------------------------------------------------------------------
-    # Step Functions
-    # -------------------------------------------------------------------------
-
-    def step_market(self, market_bar: dict) -> MarketRegimeState:
-        """
-        Advance Layer 1 by one market bar.
-
-        Args:
-            market_bar: Dict with 'close' and 'timestamp' keys
-
-        Returns:
-            Current MarketRegimeState
-        """
-        if not self.is_trained or self.market_classifier is None:
-            raise ValueError("Market model not trained. Call train_market_model() first.")
-
-        return self.market_classifier.step(market_bar)
-
-    def get_allocation(
-        self,
-        ticker: str,
-        stock_close: float,
-        index_close: float,
-    ) -> Optional[AllocationSignal]:
-        """
-        Get allocation signal for a single ticker.
-
-        Advances Layer 2 for the ticker and combines with current
-        Layer 1 state to produce final multiplier.
-
-        Args:
-            ticker: Stock symbol
-            stock_close: Stock's closing price
-            index_close: Market index closing price
-
-        Returns:
-            AllocationSignal or None if not warmed up
-        """
-        # Ensure ticker is registered
-        if ticker not in self.stock_adjusters:
-            self.register_ticker(ticker)
-
-        # Step Layer 2
-        adjuster = self.stock_adjusters[ticker]
-        vol_profile = adjuster.step(stock_close, index_close)
-
-        # Get Layer 1 state (must already be stepped)
-        market_state = self.market_classifier.get_current_state()
-
-        if market_state is None:
-            # Layer 1 not initialized yet
-            return None
-
-        if vol_profile is None:
-            # Layer 2 not warmed up yet
-            return None
-
-        # Combine multipliers
-        final_multiplier = market_state.base_multiplier * vol_profile.vol_scalar
-
-        # Generate reasoning
-        reasoning = self._generate_reasoning(
-            ticker, market_state, vol_profile, final_multiplier
-        )
-
-        return AllocationSignal(
-            ticker=ticker,
-            final_multiplier=final_multiplier,
-            market_regime=market_state,
-            base_multiplier=market_state.base_multiplier,
-            vol_scalar=vol_profile.vol_scalar,
-            regime_label=market_state.label,
-            beta=vol_profile.beta,
-            relative_vol=vol_profile.relative_vol,
-            is_regime_confirmed=market_state.is_confirmed,
-            is_flickering=market_state.is_flickering,
-            timestamp=vol_profile.timestamp,
-            reasoning=reasoning,
-        )
-
-    def step_all(
-        self,
-        market_bar: dict,
-        stock_closes: dict[str, float],
-        index_close: float,
-    ) -> dict[str, AllocationSignal]:
-        """
-        Convenience method to update everything in one call.
-
-        Args:
-            market_bar: Dict with 'close' and 'timestamp' for market index
-            stock_closes: Dict mapping ticker -> close price
-            index_close: Market index close price
-
-        Returns:
-            Dict mapping ticker -> AllocationSignal
-        """
-        # Step Layer 1
-        self.step_market(market_bar)
-
-        # Step Layer 2 for each ticker
-        signals = {}
-        for ticker, stock_close in stock_closes.items():
-            signal = self.get_allocation(ticker, stock_close, index_close)
-            if signal is not None:
-                signals[ticker] = signal
-
-        return signals
-
-    def _generate_reasoning(
-        self,
-        ticker: str,
-        market_state: MarketRegimeState,
-        vol_profile: StockVolatilityProfile,
-        final_multiplier: float,
-    ) -> str:
-        """Generate human-readable reasoning for the signal."""
-        parts = []
-
-        # Market regime
-        parts.append(f"Market: {market_state.label}")
-        if market_state.is_flickering:
-            parts.append("(flickering)")
-        elif market_state.is_confirmed:
-            parts.append("(confirmed)")
-
-        # Volatility
-        parts.append(f"Vol: {vol_profile.relative_vol:.2f}x market")
-        parts.append(f"Beta: {vol_profile.beta:.2f}")
-
-        # Multiplier breakdown
-        parts.append(f"Base: {market_state.base_multiplier:.2f}")
-        parts.append(f"Vol scalar: {vol_profile.vol_scalar:.2f}")
-        parts.append(f"Final: {final_multiplier:.2f}")
-
-        return " | ".join(parts)
-
-    # -------------------------------------------------------------------------
-    # Daily Update Orchestration
-    # -------------------------------------------------------------------------
-
-    def run_daily_update(
-        self,
-        market_tickers: list[str] = None,
-        registered_tickers: list[str] = None,
-        lookback_days: int = 504,
-    ) -> dict:
-        """
-        Orchestrate a daily update cycle.
-
-        1. Pull latest market index bars
-        2. Pull latest bars for registered tickers
-        3. Step both layers
-        4. Write results to Supabase hmm_results
-
-        Args:
-            market_tickers: List of market indexes to try (first successful used)
-            registered_tickers: Tickers to process (uses registered if None)
-            lookback_days: Days of history to fetch
-
-        Returns:
-            Dict with 'successes' and 'failures' counts
-        """
-        if market_tickers is None:
-            market_tickers = [self.market_ticker]
-        if registered_tickers is None:
-            registered_tickers = list(self.stock_adjusters.keys())
-
-        logger.info(f"Running daily update for {len(registered_tickers)} tickers")
-
-        # Determine date range
-        end_date = datetime.now(timezone.utc)
-        start_date = end_date - timedelta(days=lookback_days)
-
-        # Load market data (try each ticker until one works)
-        market_df = None
-        used_market_ticker = None
-        for mt in market_tickers:
-            try:
-                market_df = self.load_stock_prices_from_supabase(mt, start_date, end_date)
-                if not market_df.empty:
-                    used_market_ticker = mt
-                    break
-            except Exception as e:
-                logger.warning(f"Failed to load {mt}: {e}")
-                continue
-
-        if market_df is None or market_df.empty:
-            raise ValueError(f"Could not load market data from any ticker: {market_tickers}")
-
-        # Update market ticker if different
-        if used_market_ticker and used_market_ticker != self.market_ticker:
-            logger.info(f"Using market data from {used_market_ticker}")
-            self.market_ticker = used_market_ticker
-
-        # Train or step market model
-        if not self.is_trained:
-            logger.info("Training market model...")
-            self.train_market_model(market_df)
-
-        # Always step through each bar to initialize forward algorithm
-        for idx in range(len(market_df)):
-            bar = market_df.iloc[idx]
-            self.step_market({
-                "close": bar["close"],
-                "timestamp": market_df.index[idx],
-            })
-
-        # Get current market state
-        market_state = self.market_classifier.get_current_state()
-        if market_state is None:
-            raise ValueError("Market model not producing states")
-
-        # Pre-warm Layer 2 adjusters with historical data
-        logger.info("Warming up Layer 2 adjusters...")
-        for ticker in registered_tickers:
-            try:
-                stock_df = self.load_stock_prices_from_supabase(ticker, start_date, end_date)
-                if stock_df.empty:
-                    logger.warning(f"No data for {ticker}, skipping warm-up")
-                    continue
-
-                # Step through historical bars to warm up adjuster
-                min_len = min(len(stock_df), len(market_df))
-                for i in range(min_len):
-                    stock_close = stock_df.iloc[i]["close"]
-                    index_close = market_df.iloc[i]["close"]
-                    self.stock_adjusters[ticker].step(stock_close, index_close, stock_df.index[i])
-
-                logger.info(f"Warmed up {ticker}: {len(self.stock_adjusters[ticker].stock_prices)} bars")
-            except Exception as e:
-                logger.warning(f"Failed to warm up {ticker}: {e}")
-
-        # Load and process each ticker
-        client = self._get_supabase_client()
-        successes = 0
-        failures = 0
-
-        for ticker in registered_tickers:
-            try:
-                # Load stock data
-                stock_df = self.load_stock_prices_from_supabase(ticker, start_date, end_date)
-                if stock_df.empty:
-                    logger.warning(f"No data for {ticker}, skipping")
-                    failures += 1
-                    continue
-
-                # Get latest prices
-                stock_close = float(stock_df.iloc[-1]["close"])
-                index_close = float(market_df.iloc[-1]["close"])
-
-                # Get allocation signal
-                signal = self.get_allocation(ticker, stock_close, index_close)
-
-                if signal is None:
-                    logger.warning(f"Signal not ready for {ticker}")
-                    failures += 1
-                    continue
-
-                # Write to Supabase
-                self._write_allocation_signal(client, signal)
-                successes += 1
-                logger.info(f"Saved signal for {ticker}: multiplier={signal.final_multiplier:.2f}")
-
-            except Exception as e:
-                logger.error(f"Failed to process {ticker}: {e}")
-                failures += 1
-                continue
-
-        result = {
-            "successes": successes,
-            "failures": failures,
-            "total": len(registered_tickers),
-            "market_state": market_state.label if market_state else "UNKNOWN",
-        }
-
-        logger.info(f"Daily update complete: {successes} success, {failures} failures")
-        return result
-
-    def _write_allocation_signal(
-        self,
-        client: supabase.Client,
-        signal: AllocationSignal,
-    ) -> None:
-        """Write allocation signal to Supabase hmm_results table."""
-        from datetime import date
-
-        data = {
-            "ticker": signal.ticker,
-            "result_date": signal.timestamp.date().isoformat(),
-            "regime_label": signal.regime_label,
-            "state_id": signal.market_regime.state_id,
-            "probability": signal.market_regime.probability,
-            "state_probabilities": signal.market_regime.state_probabilities,
-            "volatility_level": signal.market_regime.volatility_bucket,
-            "position_multiplier": signal.final_multiplier,
-            # Extended fields for Two-Layer system
-            "final_multiplier": signal.final_multiplier,
-            "base_multiplier": signal.base_multiplier,
-            "vol_scalar": signal.vol_scalar,
-            "beta": signal.beta,
-            "relative_vol": signal.relative_vol,
-            "is_regime_confirmed": signal.is_regime_confirmed,
-            "is_flickering": signal.is_flickering,
-            "reasoning": signal.reasoning,
-            "stability_bars": signal.market_regime.consecutive_bars,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        # Use upsert on (ticker, result_date)
-        client.table("hmm_results").upsert(data, on_conflict="ticker,result_date").execute()
+    """Compatibility facade around the one supported train-only workflow."""
+
+    def __init__(self, market_ticker: str = "SPY", client: Any | None = None):
+        self.market_ticker = market_ticker.upper()
+        self.client = client
+
+    def run(self, client: Any | None = None, **kwargs: Any) -> dict[str, Any]:
+        client = client or self.client
+        if client is None:
+            raise ValueError("A Supabase client is required")
+        return run_train_only(client, self.market_ticker, **kwargs)

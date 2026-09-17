@@ -188,27 +188,22 @@ def uploadToSupabase(df: pd.DataFrame, client: supabase.Client) -> tuple[int, in
     print(f"\nExisting tickers in DB: {len(existingTickers)}")
     print(f"New tickers to upload: {len(df)}")
 
-    # Prepare new records
-    newRecords = []
+    # `created_at` is the universe-run marker consumed by train-only. Refresh
+    # it for every ticker in this load, not only newly discovered symbols.
+    records = []
     for _, row in df.iterrows():
         ticker = row["ticker"]
+        records.append({
+            "ticker": ticker, "name": row["name"], "exchange": row["exchange"],
+            "sector": row["sector"], "industry": row["industry"],
+            "is_active": True, "created_at": now,
+        })
         if ticker not in existingTickers:
-            newRecords.append({
-                "ticker": ticker,
-                "name": row["name"],
-                "exchange": row["exchange"],
-                "sector": row["sector"],
-                "industry": row["industry"],
-                "is_active": True,
-                "created_at": now,
-            })
             newCount += 1
 
-    # Insert new tickers
-    if newRecords:
-        print(f"Inserting {len(newRecords)} new tickers...")
-        client.table("stocks").insert(newRecords).execute()
-        print(f"  Inserted {len(newRecords)} new tickers")
+    if records:
+        client.table("stocks").upsert(records, on_conflict="ticker").execute()
+        print(f"  Upserted {len(records)} tickers for execution {now}")
 
     # Deactivate tickers no longer in the fetched list
     fetchedTickers = set(df["ticker"].tolist())

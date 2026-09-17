@@ -533,23 +533,22 @@ class MarketRegimeClassifier:
                         n_components=n_states,
                         covariance_type="full",   # ← full, not diag
                         n_iter=1000,              # ← 1000 iterations; 100 is too few
+                        min_covar=1e-4,
                         random_state=seed,
                         params="stmc",            # optimise start, trans, means, covars
                         init_params="stmc",
                     )
                     model.fit(scaled_features)
 
-                    # model.score() returns AVERAGE log-likelihood per sample.
-                    # Total LL = avg_ll × n_samples; BIC uses the total.
-                    avg_ll = model.score(scaled_features)
-                    total_ll = avg_ll * len(scaled_features)
+                    # hmmlearn.score() is already the sequence total log likelihood.
+                    total_ll = model.score(scaled_features)
 
                     k = self._count_params(n_states, N_FEATURES)
                     bic = -2.0 * total_ll + k * np.log(len(scaled_features))
 
                     logger.debug(
                         "n_states=%d  restart=%d  seed=%d  avg_ll=%.4f  BIC=%.2f",
-                        n_states, restart, seed, avg_ll, bic,
+                        n_states, restart, seed, total_ll / len(scaled_features), bic,
                     )
 
                     if bic < candidate_best_bic:
@@ -560,7 +559,7 @@ class MarketRegimeClassifier:
                             "startprob": deepcopy(model.startprob_),
                             "transmat":  deepcopy(model.transmat_),
                             "means":     deepcopy(model.means_),
-                            "covars":    deepcopy(model.covars_),
+                            "covars":    self._regularize_covariances(model.covars_),
                         }
 
                 except Exception as exc:
@@ -589,6 +588,22 @@ class MarketRegimeClassifier:
             "Selected n_states=%d  global BIC=%.2f", global_best_n, global_best_bic
         )
         return global_best_weights, global_best_n, global_best_bic
+
+    @staticmethod
+    def _regularize_covariances(covariances: np.ndarray) -> np.ndarray:
+        """Make full covariance matrices symmetric positive-definite.
+
+        Sparse HMM states can be numerically indefinite after EM.  Flooring
+        eigenvalues retains the learned correlation structure while keeping
+        Viterbi and forward-density calculations well-defined.
+        """
+        regularized = []
+        for covariance in np.asarray(covariances, dtype=float):
+            symmetric = (covariance + covariance.T) / 2.0
+            values, vectors = np.linalg.eigh(symmetric)
+            values = np.maximum(values, 1e-4)
+            regularized.append((vectors * values) @ vectors.T)
+        return np.asarray(regularized)
 
     @staticmethod
     def _count_params(n_states: int, n_features: int) -> int:

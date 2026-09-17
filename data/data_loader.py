@@ -30,10 +30,10 @@ load_dotenv(".env.secrets")
 def getSupabaseClient() -> supabase.Client:
     """Initialize and return Supabase client."""
     supabaseUrl = os.getenv("SUPABASE_URL")
-    supabaseKey = os.getenv("SUPABASE_ANON_KEY")
+    supabaseKey = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
 
     if not supabaseUrl or not supabaseKey:
-        raise ValueError("SUPABASE_URL and SUPABASE_ANON_KEY must be set in .env.secrets")
+        raise ValueError("SUPABASE_URL and SUPABASE_KEY (or SUPABASE_ANON_KEY) must be set in .env.secrets")
 
     return supabase.create_client(supabaseUrl, supabaseKey)
 

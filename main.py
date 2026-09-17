@@ -60,8 +60,9 @@ from core.hmm_model import (
     HMMVolatilityClassifier,
     train_hmm,
     RegimeState,
+    run_train_only,
 )
-from core.hmm_model import SUPPABASE_AVAILABLE as HMM_SUPPABASE_AVAILABLE
+from core.hmm_model import SUPABASE_AVAILABLE as HMM_SUPPABASE_AVAILABLE
 from core.regime_strategies import (
     Signal,
     Direction,
@@ -939,19 +940,13 @@ def runBacktest(settings: Settings) -> None:
     logger.info("Backtest complete")
 
 
-def runTrainOnly(settings: Settings) -> None:
-    """Train HMM and exit."""
+def runTrainOnly(settings: Settings, market_ticker: str = "SPY") -> None:
+    """Run the persisted two-layer market and per-stock HMM workflow."""
     logger.info("Starting TRAIN-ONLY mode")
-
     client = getSupabaseClient()
-    tickers = getActiveTickers(client)
-
     try:
-        model = loadOrTrainHMM(settings, client, tickers)
-        logger.info(f"HMM trained successfully")
-        logger.info(f"  Regimes: {model.n_regimes}")
-        logger.info(f"  BIC: {model.bic_score:.2f}")
-        logger.info(f"  Training date: {model.training_date}")
+        result = run_train_only(client, market_ticker)
+        logger.info("HMM train-only complete: %d stocks, market=%s, base=%.4f", len(result["results"]), result["market"]["regime_label"], result["market"]["base_multiplier"])
     except Exception as e:
         logger.error(f"HMM training failed: {e}")
         sys.exit(1)
@@ -997,6 +992,11 @@ def main():
         action="store_true",
         help="Run in dry-run mode (for dry-run command)",
     )
+    parser.add_argument(
+        "--market-ticker",
+        default=os.getenv("MARKET_TICKER", "SPY"),
+        help="Liquid market index used by train-only (default: SPY)",
+    )
 
     args = parser.parse_args()
 
@@ -1024,7 +1024,7 @@ def main():
             case "backtest":
                 runBacktest(settings)
             case "train-only":
-                runTrainOnly(settings)
+                runTrainOnly(settings, args.market_ticker)
             case "stress-test":
                 runStressTest(settings)
             case "compare":
