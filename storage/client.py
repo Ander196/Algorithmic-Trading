@@ -1,9 +1,4 @@
-"""
-Supabase client module for database operations.
-
-Provides connection to Supabase and helper functions for storing
-HMM results and other trading data.
-"""
+"""Supabase persistence helpers for market/stock models and runtime results."""
 import os
 from datetime import datetime
 from typing import Optional
@@ -13,17 +8,10 @@ from supabase import Client, create_client
 
 _env_url = os.getenv("SUPABASE_URL")
 _env_key = os.getenv("SUPABASE_ANON_KEY")
-
 _client: Optional[Client] = None
 
 
 def getClient() -> Client:
-    """
-    Get or create Supabase client singleton.
-
-    Returns:
-        Supabase Client instance
-    """
     global _client
     if _client is None:
         if not _env_url or not _env_key:
@@ -32,176 +20,64 @@ def getClient() -> Client:
     return _client
 
 
-def storeHMMResult(
-    ticker: str,
-    result_date: datetime | str,
-    regime_label: str,
-    state_id: int,
-    probability: float,
-    state_probabilities: list[float],
-    volatility_level: Optional[str] = None,
-    position_multiplier: Optional[float] = None,
-    is_confirmed: bool = False,
-    is_flickering: bool = False,
-    stability_bars: Optional[int] = None,
-    bic_score: Optional[float] = None,
-    n_regimes: Optional[int] = None,
-    training_date: Optional[datetime] = None,
-) -> dict:
-    """
-    Store HMM model results in the database.
+def storeStockRiskModel(model) -> dict:
+    """Persist the immutable JSON-equivalent model contract."""
+    data = model.to_dict()
+    data.update({"model_version": model.model_version, "config": data["config"]})
+    response = getClient().table("stock_risk_models").upsert(data, on_conflict="ticker,model_version").execute()
+    return response.data[0] if response.data else {}
 
-    Args:
-        ticker: Stock ticker symbol
-        result_date: Date of the result
-        regime_label: Detected regime label (BEAR, BULL, etc.)
-        state_id: State ID from HMM
-        probability: Probability of the current state
-        state_probabilities: Array of probabilities for all states
-        volatility_level: CALM, MODERATE, or TURBULENT
-        position_multiplier: Position sizing multiplier
-        is_confirmed: Whether regime is confirmed
-        is_flickering: Whether regime is flickering
-        stability_bars: Consecutive bars in current regime
-        bic_score: BIC score of the model
-        n_regimes: Number of regimes in the model
-        training_date: When model was trained
 
-    Returns:
-        The inserted record
-    """
-    client = getClient()
-
-    if isinstance(result_date, datetime):
-        result_date = result_date.date()
-
-    # Normalize state probabilities if they're unnormalized (emission probs can be huge)
-    if state_probabilities is not None and len(state_probabilities) > 0:
-        probs = np.array(state_probabilities, dtype=float)
-        total = probs.sum()
-        if total > 0:
-            normalized_probs = probs / total
-        else:
-            normalized_probs = np.ones(len(probs)) / len(probs)
-    else:
-        normalized_probs = np.array([])
-
+def storeAllocationResult(signal) -> dict:
+    """Persist one auditable Layer 1 + Layer 2 allocation result."""
     data = {
-        "ticker": ticker.upper(),
-        "result_date": result_date.isoformat() if hasattr(result_date, 'isoformat') else str(result_date),
+        "result_timestamp": signal.timestamp.isoformat(),
+        "ticker": signal.ticker,
+        "market_regime": signal.regime_label,
+        "market_regime_probability": signal.market_regime.probability,
+        "base_multiplier": signal.base_multiplier,
+        "relative_vol": signal.relative_vol,
+        "beta": signal.beta,
+        "vol_scalar": signal.vol_scalar,
+        "final_multiplier": signal.final_multiplier,
+        "is_regime_confirmed": signal.is_regime_confirmed,
+        "is_flickering": signal.is_flickering,
+        "reasoning": signal.reasoning,
+    }
+    response = getClient().table("allocation_results").insert(data).execute()
+    return response.data[0] if response.data else {}
+
+
+def storeHMMResult(*args, **kwargs) -> dict:
+    """Legacy compatibility: retained for old callers during migration."""
+    ticker = kwargs.get("ticker", args[0] if args else None)
+    result_date = kwargs.get("result_date", args[1] if len(args) > 1 else None)
+    regime_label = kwargs.get("regime_label", args[2] if len(args) > 2 else None)
+    state_id = kwargs.get("state_id", args[3] if len(args) > 3 else None)
+    probability = kwargs.get("probability", args[4] if len(args) > 4 else None)
+    state_probabilities = kwargs.get("state_probabilities", args[5] if len(args) > 5 else [])
+    data = {
+        "ticker": str(ticker).upper(),
+        "result_date": result_date.date().isoformat() if isinstance(result_date, datetime) else str(result_date),
         "regime_label": regime_label,
         "state_id": state_id,
         "probability": float(probability),
-        "state_probabilities": normalized_probs.tolist(),
-        "volatility_level": volatility_level,
-        "position_multiplier": float(position_multiplier) if position_multiplier else None,
-        "is_confirmed": is_confirmed,
-        "is_flickering": is_flickering,
-        "stability_bars": stability_bars,
-        # Set BIC to null if too large for database precision
-        "bic_score": float(bic_score) if bic_score and abs(bic_score) < 1e8 else None,
-        "n_regimes": n_regimes,
-        "training_date": training_date.isoformat() if training_date else None,
+        "state_probabilities": (np.asarray(state_probabilities, dtype=float) / max(float(np.sum(state_probabilities)), 1e-300)).tolist() if state_probabilities else [],
+        "volatility_level": kwargs.get("volatility_level"),
+        "position_multiplier": kwargs.get("position_multiplier"),
+        "is_confirmed": kwargs.get("is_confirmed", False),
+        "is_flickering": kwargs.get("is_flickering", False),
+        "stability_bars": kwargs.get("stability_bars"),
+        "bic_score": kwargs.get("bic_score"),
+        "n_regimes": kwargs.get("n_regimes"),
+        "training_date": kwargs.get("training_date").isoformat() if kwargs.get("training_date") else None,
     }
-
-    response = client.table("hmm_results").insert(data).execute()
+    response = getClient().table("hmm_results").insert(data).execute()
     return response.data[0] if response.data else {}
 
 
 def getHMMResults(ticker: Optional[str] = None, limit: int = 100) -> list[dict]:
-    """
-    Retrieve HMM results from the database.
-
-    Args:
-        ticker: Optional ticker filter
-        limit: Maximum number of results
-
-    Returns:
-        List of HMM result records
-    """
-    client = getClient()
-    query = client.table("hmm_results").select("*")
-
+    query = getClient().table("hmm_results").select("*")
     if ticker:
         query = query.eq("ticker", ticker.upper())
-
-    query = query.order("result_date", desc=True).limit(limit)
-    response = query.execute()
-    return response.data or []
-
-
-def storeStockPrices(
-    ticker: str,
-    price_date: str,
-    open_price: float,
-    high: float,
-    low: float,
-    close: float,
-    volume: Optional[int] = None,
-    adj_close: Optional[float] = None,
-) -> dict:
-    """
-    Store OHLCV stock price data.
-
-    Args:
-        ticker: Stock ticker symbol
-        price_date: Date of the price
-        open_price: Open price
-        high: High price
-        low: Low price
-        close: Close price
-        volume: Trading volume
-        adj_close: Adjusted close price
-
-    Returns:
-        The inserted record
-    """
-    client = getClient()
-
-    data = {
-        "ticker": ticker.upper(),
-        "price_date": price_date,
-        "open": open_price,
-        "high": high,
-        "low": low,
-        "close": close,
-        "volume": volume,
-        "adj_close": adj_close,
-    }
-
-    response = client.table("stock_prices").insert(data).execute()
-    return response.data[0] if response.data else {}
-
-
-def storeSignal(
-    ticker: str,
-    signal_date: str,
-    score: float,
-    action: str = "buy",
-    indicators: Optional[dict] = None,
-) -> dict:
-    """
-    Store trading signal.
-
-    Args:
-        ticker: Stock ticker symbol
-        signal_date: Date of the signal
-        score: Signal confidence score (0-1)
-        action: buy, sell, or watch
-        indicators: Additional indicator values as JSON
-
-    Returns:
-        The inserted record
-    """
-    client = getClient()
-
-    data = {
-        "ticker": ticker.upper(),
-        "signal_date": signal_date,
-        "score": score,
-        "action": action,
-        "indicators": indicators,
-    }
-
-    response = client.table("signals").insert(data).execute()
-    return response.data[0] if response.data else {}
+    return query.order("result_date", desc=True).limit(limit).execute().data or []
