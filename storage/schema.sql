@@ -402,6 +402,58 @@ create policy "cr_insert_premium"
         )
     );
 
+create policy "market_regime_models_select_public"
+    on market_regime_models for select
+    using (true);
+
+create policy "market_regime_models_insert_public"
+    on market_regime_models for insert
+    with check (true);
+
+create policy "market_regime_models_update_public"
+    on market_regime_models for update
+    using (true)
+    with check (true);
+
+create policy "market_regime_results_select_public"
+    on market_regime_results for select
+    using (true);
+
+create policy "market_regime_results_insert_public"
+    on market_regime_results for insert
+    with check (true);
+
+create policy "market_regime_results_update_public"
+    on market_regime_results for update
+    using (true)
+    with check (true);
+
+create policy "stock_risk_models_select_public"
+    on stock_risk_models for select
+    using (true);
+
+create policy "stock_risk_models_insert_public"
+    on stock_risk_models for insert
+    with check (true);
+
+create policy "stock_risk_models_update_public"
+    on stock_risk_models for update
+    using (true)
+    with check (true);
+
+create policy "allocation_results_select_public"
+    on allocation_results for select
+    using (true);
+
+create policy "allocation_results_insert_public"
+    on allocation_results for insert
+    with check (true);
+
+create policy "allocation_results_update_public"
+    on allocation_results for update
+    using (true)
+    with check (true);
+
 
 -- ============================================================
 -- FUNCIÓN DE AUDITORÍA (opcional pero recomendada)
