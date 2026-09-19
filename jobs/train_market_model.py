@@ -26,7 +26,11 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     client = get_supabase_client()
-    history = fetch_price_history(client, market_ticker, limit=int(os.getenv("MARKET_TRAINING_BARS", "1500")))
+    history = fetch_price_history(
+        client,
+        market_ticker,
+        limit=int(os.getenv("MARKET_TRAINING_BARS", "1500")),
+    )
 
     logger.info("Training Layer 1 on %s (%d bars)", market_ticker, len(history))
     model = MarketRegimeClassifier(
@@ -37,22 +41,22 @@ def main() -> None:
     )
     model.fit(history.set_index("price_date"), market_ticker=market_ticker)
 
-    # Save once to obtain the exact canonical JSON artifact/version.
     temp_path = output_dir / ".market_regime_training.json"
     model.save_model(str(temp_path))
     payload = json.loads(temp_path.read_text(encoding="utf-8"))
-    version = payload["metadata"].get("model_version") or _artifact_version(payload)
+
+    # The artifact hash is calculated from the complete model payload before
+    # adding the hash itself, so the identifier is stable and reproducible.
+    version = _artifact_version(payload)
     payload["metadata"]["model_version"] = version
 
+    text = json.dumps(payload, indent=2) + "\n"
     versioned_path = output_dir / f"market_regime_{version}.json"
     current_path = output_dir / "current.json"
-    text = json.dumps(payload, indent=2)
-    versioned_path.write_text(text + "\n", encoding="utf-8")
-    current_path.write_text(text + "\n", encoding="utf-8")
+    versioned_path.write_text(text, encoding="utf-8")
+    current_path.write_text(text, encoding="utf-8")
     temp_path.unlink(missing_ok=True)
 
-    # Store the same JSON artifact in Supabase. The database is the runtime
-    # source of truth; the versioned files are the auditable Git artifact.
     client.table("market_regime_models").upsert(
         {
             "model_version": version,
@@ -68,16 +72,13 @@ def main() -> None:
         on_conflict="model_version",
     ).execute()
 
-    # Keep exactly one active model for the market ticker.
     client.table("market_regime_models").update({"status": "ARCHIVED"}).eq(
         "market_ticker", market_ticker
     ).neq("model_version", version).execute()
 
     logger.info(
         "Layer 1 trained successfully: version=%s states=%d BIC=%.2f",
-        version,
-        model.n_states,
-        model.bic_score,
+        version, model.n_states, model.bic_score,
     )
 
 
