@@ -1,0 +1,54 @@
+name: Daily Allocation
+
+on:
+  schedule:
+    - cron: "30 22 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: daily-allocation
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  allocation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      MARKET_TICKER: ${{ vars.MARKET_TICKER || 'SPY' }}
+      MARKET_MODEL_PATH: models/market/current.json
+      STOCK_MODEL_DIR: models/stocks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ingest latest prices
+        run: python -m jobs.ingest_prices
+
+      - name: Calculate Layer 1 + Layer 2
+        run: python -m jobs.daily_allocation
+
+      - name: Persist stock model artifacts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add models/stocks
+          if git diff --cached --quiet; then
+            echo "No stock model artifact changes."
+          else
+            git commit -m "chore: update stock risk model artifacts"
+            git push
+          fi

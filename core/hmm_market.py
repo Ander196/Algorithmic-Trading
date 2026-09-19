@@ -1115,6 +1115,7 @@ class MarketRegimeClassifier:
 
         payload = {
             "metadata": {
+                "schema_version": 1,
                 "model_type": "MarketRegimeClassifier",
                 "n_states": self.n_states,
                 "bic_score": self.bic_score,

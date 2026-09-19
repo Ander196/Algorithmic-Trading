@@ -43,7 +43,18 @@ class StockRiskModel:
 
     @property
     def model_version(self) -> str:
-        canonical = json.dumps(self.to_dict(include_version=False), sort_keys=True).encode()
+        # The Layer 2 formula/config is versioned independently from the
+        # weekly Layer 1 market artifact. The market model is a runtime
+        # dependency and is persisted separately with each allocation result.
+        canonical = json.dumps(
+            {
+                "model_type": MODEL_TYPE,
+                "schema_version": SCHEMA_VERSION,
+                "ticker": self.ticker,
+                "config": asdict(self.config),
+            },
+            sort_keys=True,
+        ).encode()
         return hashlib.sha256(canonical).hexdigest()[:16]
 
     def step(self, stock_close: float, market_close: float, timestamp: Optional[datetime] = None) -> Optional[StockVolatilityProfile]:

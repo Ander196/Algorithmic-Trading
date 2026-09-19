@@ -26,7 +26,7 @@ def storeStockRiskModel(model) -> dict:
     return response.data[0] if response.data else {}
 
 
-def storeAllocationResult(signal) -> dict:
+def storeAllocationResult(signal, market_model_version: Optional[str] = None, stock_model_version: Optional[str] = None) -> dict:
     data = {
         "result_timestamp": signal.timestamp.isoformat(),
         "ticker": signal.ticker,
@@ -40,6 +40,8 @@ def storeAllocationResult(signal) -> dict:
         "is_regime_confirmed": signal.is_regime_confirmed,
         "is_flickering": signal.is_flickering,
         "reasoning": signal.reasoning,
+        "market_model_version": market_model_version,
+        "stock_model_version": stock_model_version,
     }
     response = getClient().table("allocation_results").insert(data).execute()
     return response.data[0] if response.data else {}
