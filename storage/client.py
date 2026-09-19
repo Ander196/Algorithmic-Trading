@@ -1,4 +1,6 @@
 """Supabase persistence helpers for models and runtime trading data."""
+from __future__ import annotations
+
 import os
 from datetime import datetime
 from typing import Optional
@@ -7,7 +9,7 @@ import numpy as np
 from supabase import Client, create_client
 
 _env_url = os.getenv("SUPABASE_URL")
-_env_key = os.getenv("SUPABASE_KEY")
+_env_key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
 _client: Optional[Client] = None
 
 
@@ -15,7 +17,7 @@ def getClient() -> Client:
     global _client
     if _client is None:
         if not _env_url or not _env_key:
-            raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
+            raise ValueError("SUPABASE_URL and SUPABASE_KEY/SUPABASE_ANON_KEY must be set")
         _client = create_client(_env_url, _env_key)
     return _client
 
