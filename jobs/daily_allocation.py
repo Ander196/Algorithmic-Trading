@@ -24,6 +24,8 @@ from storage.client import storeAllocationResult, storeStockRiskModel
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+STOCK_HISTORY_LOOKBACK = 160
+
 
 def _market_model_version(path: Path, payload: dict) -> str:
     version = payload.get("metadata", {}).get("model_version")
@@ -81,8 +83,6 @@ def _calculate_stock(
     model_path = model_dir / ticker / "risk_model.json"
     if model_path.exists():
         model = StockRiskModel.load_model(str(model_path))
-        # The formula/config defines the stock model version. The market model
-        # version is a runtime dependency and is persisted separately.
         model.market_model_version = market_model_version
     else:
         model = StockRiskModel(ticker, config, market_model_version)
@@ -123,7 +123,11 @@ def main() -> None:
     model_dir = Path(os.getenv("STOCK_MODEL_DIR", "models/stocks"))
 
     market_model, market_model_version = _load_active_market_model()
-    market_history = fetch_price_history(client, market_ticker, limit=350)
+    market_history = fetch_price_history(
+        client,
+        market_ticker,
+        limit=int(os.getenv("MARKET_ALLOCATION_HISTORY_BARS", "350")),
+    )
     market_state = _warm_market_model(market_model, market_history)
 
     client.table("market_regime_results").upsert(
@@ -149,7 +153,11 @@ def main() -> None:
 
     for ticker in tickers:
         try:
-            stock_history = fetch_price_history(client, ticker, limit=100)
+            stock_history = fetch_price_history(
+                client,
+                ticker,
+                limit=int(os.getenv("STOCK_ALLOCATION_HISTORY_BARS", str(STOCK_HISTORY_LOOKBACK))),
+            )
             _calculate_stock(
                 market_state,
                 market_model_version,
