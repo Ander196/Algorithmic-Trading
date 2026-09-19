@@ -45,7 +45,7 @@ def storeAllocationResult(signal, market_model_version: Optional[str] = None, st
         "market_model_version": market_model_version,
         "stock_model_version": stock_model_version,
     }
-    response = getClient().table("allocation_results").upsert(\n        data,\n        on_conflict="ticker,result_timestamp,market_model_version,stock_model_version",\n    ).execute()
+    response = getClient().table("allocation_results").upsert(data,on_conflict="ticker,result_timestamp,market_model_version,stock_model_version").execute()
     return response.data[0] if response.data else {}
 
 
