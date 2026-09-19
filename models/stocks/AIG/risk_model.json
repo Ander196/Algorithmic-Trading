@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "model_type": "StockRiskModel",
+  "ticker": "AIG",
+  "market_model_version": "a74bb57ab7625ac2",
+  "created_at": "2026-09-19T22:57:01.278936+00:00",
+  "config": {
+    "vol_window": 21,
+    "beta_window": 63,
+    "min_scalar": 0.25,
+    "max_scalar": 1.0,
+    "beta_penalty_strength": 0.3,
+    "turbulent_beta_penalty": 1.25
+  },
+  "model_version": "a8f6adc97a1afd19"
+}
