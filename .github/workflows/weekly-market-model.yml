@@ -1,0 +1,54 @@
+name: Weekly Market Model
+
+on:
+  schedule:
+    - cron: "30 22 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: weekly-market-model
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      MARKET_TICKER: ${{ vars.MARKET_TICKER || 'SPY' }}
+      MARKET_TRAINING_BARS: ${{ vars.MARKET_TRAINING_BARS || '1500' }}
+      HMM_N_INIT: ${{ vars.HMM_N_INIT || '10' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ingest latest prices
+        run: python -m jobs.ingest_prices
+
+      - name: Train Layer 1
+        run: python -m jobs.train_market_model
+
+      - name: Persist model artifacts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add models/market
+          if git diff --cached --quiet; then
+            echo "No market model artifact changes."
+          else
+            git commit -m "chore: update weekly market model"
+            git push
+          fi
