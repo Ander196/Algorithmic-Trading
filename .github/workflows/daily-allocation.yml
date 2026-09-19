@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -43,12 +45,21 @@ jobs:
 
       - name: Persist stock model artifacts
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add models/stocks
           if git diff --cached --quiet; then
             echo "No stock model artifact changes."
-          else
-            git commit -m "chore: update stock risk model artifacts"
-            git push
+            exit 0
           fi
+
+          git commit -m "chore: update stock risk model artifacts"
+
+          # master may have advanced while the allocation job was running.
+          # Rebase the artifact commit onto the latest remote master before pushing.
+          git fetch origin master
+          git rebase origin/master
+
+          git push origin HEAD:master
