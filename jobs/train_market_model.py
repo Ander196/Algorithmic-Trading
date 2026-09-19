@@ -67,7 +67,7 @@ def main() -> None:
             "n_states": model.n_states,
             "bic_score": model.bic_score,
             "artifact": payload,
-            "status": "ACTIVE",
+            "status": "ARCHIVED",
         },
         on_conflict="model_version",
     ).execute()
@@ -75,6 +75,9 @@ def main() -> None:
     client.table("market_regime_models").update({"status": "ARCHIVED"}).eq(
         "market_ticker", market_ticker
     ).neq("model_version", version).execute()
+    client.table("market_regime_models").update({"status": "ACTIVE"}).eq(
+        "model_version", version
+    ).execute()
 
     logger.info(
         "Layer 1 trained successfully: version=%s states=%d BIC=%.2f",
