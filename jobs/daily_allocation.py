@@ -56,6 +56,19 @@ def _warm_market_model(model: MarketRegimeClassifier, history: pd.DataFrame):
     state = model.get_current_state()
     if state is None:
         raise RuntimeError("Layer 1 produced no market state")
+
+    latest_price_date = pd.Timestamp(history["price_date"].max()).date()
+    state_date = pd.Timestamp(state.timestamp).date()
+    if state_date != latest_price_date:
+        raise RuntimeError(
+            "Layer 1 state date does not match the latest market price date: "
+            f"state_date={state_date}, latest_price_date={latest_price_date}"
+        )
+
+    logger.info(
+        "Layer 1 warm-up complete: bars=%d latest_price_date=%s state_date=%s regime=%s",
+        len(history), latest_price_date, state_date, state.label,
+    )
     return state
 
 
