@@ -21,7 +21,15 @@ def fetch_price_history(
     ticker: str,
     limit: int = 1500,
 ) -> pd.DataFrame:
-    """Read the most recent OHLCV history, handling Supabase pagination."""
+    """Read the most recent OHLCV history, handling Supabase pagination.
+
+    The query is ordered newest-first so the requested ``limit`` contains the
+    latest observations. The returned DataFrame is then sorted chronologically
+    because downstream rolling features and stateful models expect time order.
+    """
+    if limit <= 0:
+        raise ValueError("limit must be greater than zero")
+
     rows: list[dict] = []
     page_size = 1000
     offset = 0
@@ -32,7 +40,7 @@ def fetch_price_history(
             client.table("stock_prices")
             .select("price_date,open,high,low,close,volume")
             .eq("ticker", ticker.upper())
-            .order("price_date", desc=False)
+            .order("price_date", desc=True)
             .range(offset, end)
             .execute()
         )
