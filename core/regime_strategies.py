@@ -383,3 +383,36 @@ def create_orchestrator(
 ) -> StrategyOrchestrator:
     """Create the strategy orchestrator using the canonical contracts."""
     return StrategyOrchestrator(config)
+
+
+# ---------------------------------------------------------------------------
+# Legacy compatibility
+# ---------------------------------------------------------------------------
+# RiskManager is migrated in the next phase. These aliases keep existing
+# imports working while the downstream contract is being migrated. New code
+# must use TradeDirection and StrategySignal instead.
+Direction = TradeDirection
+
+
+@dataclass
+class LegacySignal:
+    """Temporary compatibility contract for the pre-refactor RiskManager."""
+
+    symbol: str
+    direction: TradeDirection
+    confidence: float
+    entry_price: float
+    stop_loss: float
+    take_profit: Optional[float] = None
+    position_size_pct: float = 0.0
+    leverage: float = 1.0
+    regime_id: int = 0
+    regime_name: str = "UNKNOWN"
+    regime_probability: float = 0.0
+    timestamp: Optional[object] = None
+    reasoning: str = ""
+    strategy_name: str = ""
+    metadata: dict = field(default_factory=dict)
+
+
+Signal = LegacySignal
