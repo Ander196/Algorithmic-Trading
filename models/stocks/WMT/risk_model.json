@@ -2,7 +2,7 @@
   "schema_version": 1,
   "model_type": "StockRiskModel",
   "ticker": "WMT",
-  "market_model_version": "a74bb57ab7625ac2",
+  "market_model_version": "ca856cac4233c941",
   "created_at": "2026-09-19T22:57:46.947613+00:00",
   "config": {
     "vol_window": 21,
