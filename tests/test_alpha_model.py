@@ -21,7 +21,8 @@ def _dataset(rows: int = 300) -> pd.DataFrame:
     )
     frame["ticker"] = ["AAA"] * rows
     frame["label_end_date"] = dates + pd.Timedelta(days=5)
-    return frame.set_index(["index", "ticker"]).rename_axis(["date", "ticker"])
+    frame.index.name = "date"
+    return frame.set_index(["date", "ticker"])
 
 
 def test_alpha_model_fits_and_scores() -> None:
