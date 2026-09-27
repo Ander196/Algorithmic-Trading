@@ -39,8 +39,7 @@ def test_selector_filters_and_ranks_candidates() -> None:
     predictions = pd.DataFrame(
         {
             "ticker": ["AAA", "BBB", "CCC", "DDD"],
-            "alpha_score": [3.0, 2.0, 4.0, 1.0],
-            "probability_positive": [0.80, 0.70, 0.40, 0.90],
+            "expected_excess_return": [0.03, 0.02, 0.04, 0.01],
         }
     )
     allocations = {
@@ -51,7 +50,7 @@ def test_selector_filters_and_ranks_candidates() -> None:
     }
 
     result = AlphaSelector(
-        AlphaSelectionConfig(top_n=2, min_probability_positive=0.50)
+        AlphaSelectionConfig(top_n=2, min_expected_excess_return=0.0)
     ).rank(predictions, allocations)
 
     assert result["ticker"].tolist() == ["AAA", "DDD"]
@@ -62,8 +61,7 @@ def test_selector_is_deterministic_on_ties() -> None:
     predictions = pd.DataFrame(
         {
             "ticker": ["BBB", "AAA"],
-            "alpha_score": [1.0, 1.0],
-            "probability_positive": [0.7, 0.7],
+            "expected_excess_return": [0.01, 0.01],
         }
     )
     allocations = {
