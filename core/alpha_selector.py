@@ -1,7 +1,7 @@
 """Alpha ranking and candidate selection.
 
-This module converts model scores into a small candidate universe. It does not
-place trades, choose entries, or perform portfolio sizing.
+This module converts model predictions into a small candidate universe. It does
+not place trades, choose entries, or perform portfolio sizing.
 """
 
 from __future__ import annotations
@@ -15,20 +15,22 @@ from core.types import AllocationSignal
 
 @dataclass(frozen=True)
 class AlphaSelectionConfig:
-    """Rules for turning Alpha scores into candidates."""
+    """Rules for turning Alpha predictions into candidates."""
 
     top_n: int = 20
-    min_probability_positive: float = 0.50
+    min_expected_excess_return: float = 0.0
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
             raise ValueError("top_n must be > 0")
-        if not 0.0 <= self.min_probability_positive <= 1.0:
-            raise ValueError("min_probability_positive must be between 0 and 1")
 
 
 class AlphaSelector:
-    """Rank stocks by Alpha while respecting Layer 2 eligibility."""
+    """Rank stocks by predicted expected excess return.
+
+    AllocationSignal remains an eligibility/risk-budget gate. It is not used
+    to alter the Alpha score or determine final position size.
+    """
 
     def __init__(self, config: AlphaSelectionConfig | None = None) -> None:
         self.config = config or AlphaSelectionConfig()
@@ -38,13 +40,8 @@ class AlphaSelector:
         predictions: pd.DataFrame,
         allocations: dict[str, AllocationSignal],
     ) -> pd.DataFrame:
-        """Return the ranked candidate universe for one decision date.
-
-        Only tickers with a positive AllocationSignal budget are eligible.
-        The Alpha model determines ranking; AllocationSignal acts as an
-        upstream risk/exposure gate and is not converted into position size.
-        """
-        required = {"ticker", "alpha_score", "probability_positive"}
+        """Return the ranked candidate universe for one decision date."""
+        required = {"ticker", "expected_excess_return"}
         missing = required - set(predictions.columns)
         if missing:
             raise ValueError(f"predictions missing required columns: {sorted(missing)}")
@@ -58,13 +55,13 @@ class AlphaSelector:
         rows = rows.dropna(subset=["allocation_multiplier"])
         rows = rows[rows["allocation_multiplier"] > 0.0]
         rows = rows[
-            rows["probability_positive"]
-            >= self.config.min_probability_positive
+            rows["expected_excess_return"]
+            >= self.config.min_expected_excess_return
         ]
 
         rows = rows.sort_values(
-            ["alpha_score", "probability_positive", "ticker"],
-            ascending=[False, False, True],
+            ["expected_excess_return", "ticker"],
+            ascending=[False, True],
         ).reset_index(drop=True)
 
         rows["alpha_rank"] = range(1, len(rows) + 1)
