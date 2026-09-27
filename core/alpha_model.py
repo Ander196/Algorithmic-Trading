@@ -1,9 +1,8 @@
 """Baseline Alpha model for cross-sectional stock selection.
 
-The model consumes a point-in-time Alpha dataset and estimates the probability
-that a stock's future excess return will be positive. The probability is used
-as an interpretable signal; the model's decision score is the primary ranking
-signal.
+The model consumes a point-in-time Alpha dataset and predicts the expected
+future excess return of each stock relative to the market. The prediction is
+the Alpha ranking signal.
 
 This module intentionally does not:
 - perform walk-forward splitting;
@@ -19,10 +18,9 @@ Strategy, RiskManager and Execution layers respectively.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -31,12 +29,11 @@ from core.alpha_dataset import DEFAULT_FEATURE_COLUMNS
 
 @dataclass(frozen=True)
 class AlphaModelConfig:
-    """Configuration for the V1 logistic-regression Alpha baseline."""
+    """Configuration for the V1 Ridge-regression Alpha baseline."""
 
     feature_columns: tuple[str, ...] = DEFAULT_FEATURE_COLUMNS
-    c: float = 1.0
+    alpha: float = 1.0
     max_iter: int = 1000
-    random_state: int = 42
     min_samples: int = 200
 
     def __post_init__(self) -> None:
@@ -44,8 +41,8 @@ class AlphaModelConfig:
             raise ValueError("feature_columns must not be empty")
         if len(set(self.feature_columns)) != len(self.feature_columns):
             raise ValueError("feature_columns must not contain duplicates")
-        if self.c <= 0:
-            raise ValueError("c must be > 0")
+        if self.alpha <= 0:
+            raise ValueError("alpha must be > 0")
         if self.max_iter <= 0:
             raise ValueError("max_iter must be > 0")
         if self.min_samples <= 1:
@@ -53,18 +50,17 @@ class AlphaModelConfig:
 
 
 class AlphaModel:
-    """Fit and score a point-in-time binary Alpha model.
+    """Fit and score a point-in-time continuous Alpha model.
 
-    The training target is:
-        1  -> future excess return > 0
-        0  -> future excess return <= 0
+    The training target is the dataset's:
+        target_excess_return
 
-    The model is deliberately simple for the first baseline. A regularized
-    logistic regression in a StandardScaler pipeline provides a transparent
-    benchmark before introducing more complex learners.
+    The model directly estimates expected future excess return. The prediction
+    is therefore expressed in return units and can be ranked cross-sectionally.
+    V1 uses regularized Ridge regression as a transparent baseline.
     """
 
-    MODEL_VERSION = "logistic-v1"
+    MODEL_VERSION = "ridge-v1"
 
     def __init__(self, config: AlphaModelConfig | None = None) -> None:
         self.config = config or AlphaModelConfig()
@@ -83,7 +79,7 @@ class AlphaModel:
         """Fit the model on one already-defined training window.
 
         Temporal splitting and label purging must happen before this method is
-        called, normally via WalkForwardProtocol.materialize_fold().
+        called, normally via materialize_fold().
         """
         self._validate_dataset(dataset)
 
@@ -97,23 +93,16 @@ class AlphaModel:
             )
 
         x = train.loc[:, self.config.feature_columns]
-        y = (train["target_excess_return"] > 0.0).astype(int)
-
-        if y.nunique() != 2:
-            raise ValueError(
-                "target_excess_return must contain both positive and "
-                "non-positive classes in the training data"
-            )
+        y = train["target_excess_return"]
 
         self._pipeline = Pipeline(
             [
                 ("scaler", StandardScaler()),
                 (
-                    "classifier",
-                    LogisticRegression(
-                        C=self.config.c,
+                    "regressor",
+                    Ridge(
+                        alpha=self.config.alpha,
                         max_iter=self.config.max_iter,
-                        random_state=self.config.random_state,
                     ),
                 ),
             ]
@@ -123,7 +112,7 @@ class AlphaModel:
         return self
 
     def predict(self, dataset: pd.DataFrame) -> pd.DataFrame:
-        """Return Alpha scores/probabilities for each input row."""
+        """Return expected excess-return predictions for each input row."""
         if not self.is_fitted:
             raise RuntimeError("AlphaModel must be fitted before predict()")
 
@@ -135,8 +124,7 @@ class AlphaModel:
         x = rows.loc[:, self.config.feature_columns]
         assert self._pipeline is not None
 
-        rows["alpha_score"] = self._pipeline.decision_function(x)
-        rows["probability_positive"] = self._pipeline.predict_proba(x)[:, 1]
+        rows["expected_excess_return"] = self._pipeline.predict(x)
         return rows
 
     def coefficients(self) -> pd.Series:
@@ -145,9 +133,9 @@ class AlphaModel:
             raise RuntimeError("AlphaModel must be fitted before coefficients()")
 
         assert self._pipeline is not None
-        classifier = self._pipeline.named_steps["classifier"]
+        regressor = self._pipeline.named_steps["regressor"]
         return pd.Series(
-            classifier.coef_[0],
+            regressor.coef_,
             index=self.config.feature_columns,
             name="coefficient",
         )
