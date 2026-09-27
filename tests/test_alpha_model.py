@@ -34,17 +34,9 @@ def test_alpha_model_fits_and_scores() -> None:
 
     assert model.is_fitted
     assert model.trained_rows == len(dataset)
-    assert {"alpha_score", "probability_positive"} <= set(predictions.columns)
-    assert predictions["probability_positive"].between(0, 1).all()
+    assert "expected_excess_return" in predictions.columns
+    assert pd.api.types.is_float_dtype(predictions["expected_excess_return"])
     assert len(model.coefficients()) == len(DEFAULT_FEATURE_COLUMNS)
-
-
-def test_alpha_model_requires_both_target_classes() -> None:
-    dataset = _dataset()
-    dataset["target_excess_return"] = 0.01
-
-    with pytest.raises(ValueError, match="both positive"):
-        AlphaModel(AlphaModelConfig(min_samples=100)).fit(dataset)
 
 
 def test_alpha_model_validates_index() -> None:
