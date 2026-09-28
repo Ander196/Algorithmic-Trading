@@ -77,9 +77,8 @@ def test_dates_below_minimum_cross_section_are_excluded() -> None:
     evaluator = AlphaEvaluator(
         AlphaEvaluationConfig(top_n_values=(2,), min_cross_section=5)
     )
-    metrics = evaluator.evaluate_fold(predictions, _fold(len(predictions)))
-
-    assert metrics.valid_dates == 0 if False else metrics.valid_dates == 0
+    with pytest.raises(ValueError, match="no dates meet"):
+        evaluator.evaluate_fold(predictions, _fold(len(predictions)))
 
 
 def test_predictions_require_expected_and_realized_returns() -> None:
