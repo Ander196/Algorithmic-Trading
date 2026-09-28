@@ -112,11 +112,12 @@ class AlphaModel:
         return self
 
     def predict(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        self._validate_dataset(dataset)
+        
         """Return expected excess-return predictions for each input row."""
         if not self.is_fitted:
             raise RuntimeError("AlphaModel must be fitted before predict()")
 
-        self._validate_dataset(dataset)
         rows = dataset.dropna(subset=list(self.config.feature_columns)).copy()
         if rows.empty:
             raise ValueError("No rows with complete Alpha features are available")
