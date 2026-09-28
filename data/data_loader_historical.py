@@ -1,22 +1,22 @@
 """
-data_loader.py
+Historical OHLCV loader for all active tickers.
 
-Incremental daily ingestion script for OHLCV data.
-- Fetches active tickers from `stocks` table
-- Detects the last date with data in `stock_prices` per ticker
-- Fetches and inserts data from (last_date + 1) to today
+The loader:
+- reads active tickers from the Supabase stocks table;
+- preserves existing history in stock_prices;
+- backfills older data from yfinance when available;
+- fetches recent data from the latest stored date through today;
+- uses maximum available yfinance history by default.
 
 Usage:
-    python data_loader.py
-
-Environment variables required in .env.secrets:
-    SUPABASE_URL=https://your-project.supabase.co
-    SUPABASE_ANON_KEY=your-anon-key
+    python -m data.data_loader_historical
 """
+
+from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -30,10 +30,13 @@ load_dotenv(".env.secrets")
 def getSupabaseClient() -> supabase.Client:
     """Initialize and return Supabase client."""
     supabaseUrl = os.getenv("SUPABASE_URL")
-    supabaseKey = os.getenv("SUPABASE_ANON_KEY")
+    supabaseKey = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
 
     if not supabaseUrl or not supabaseKey:
-        raise ValueError("SUPABASE_URL and SUPABASE_ANON_KEY must be set in .env.secrets")
+        raise ValueError(
+            "SUPABASE_URL and SUPABASE_KEY (or SUPABASE_ANON_KEY) "
+            "must be set in .env.secrets"
+        )
 
     return supabase.create_client(supabaseUrl, supabaseKey)
 
@@ -46,73 +49,115 @@ def getActiveTickers(client: supabase.Client) -> list[str]:
         .eq("is_active", True)
         .execute()
     )
-    return [row["ticker"] for row in response.data]
+    return [
+        str(row["ticker"]).upper()
+        for row in response.data
+        if row.get("ticker")
+    ]
 
 
-def getLatestPriceDate(client: supabase.Client, ticker: str) -> datetime | None:
-    """Get the latest price_date existing in stock_prices for a given ticker."""
+def getLatestPriceDate(
+    client: supabase.Client,
+    ticker: str,
+) -> datetime | None:
+    """Get the latest price_date existing in stock_prices for a ticker."""
     response = (
         client.table("stock_prices")
         .select("price_date")
-        .eq("ticker", ticker)
+        .eq("ticker", ticker.upper())
         .order("price_date", desc=True)
         .limit(1)
         .execute()
     )
     if not response.data:
         return None
-    # Parse the date string to datetime for calculation
-    latestStr = response.data[0]["price_date"]
-    return datetime.strptime(latestStr, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+    return datetime.strptime(
+        response.data[0]["price_date"], "%Y-%m-%d"
+    ).replace(tzinfo=timezone.utc)
+
+
+def getEarliestPriceDate(
+    client: supabase.Client,
+    ticker: str,
+) -> datetime | None:
+    """Get the earliest price_date existing in stock_prices for a ticker."""
+    response = (
+        client.table("stock_prices")
+        .select("price_date")
+        .eq("ticker", ticker.upper())
+        .order("price_date", desc=False)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
+        return None
+
+    return datetime.strptime(
+        response.data[0]["price_date"], "%Y-%m-%d"
+    ).replace(tzinfo=timezone.utc)
 
 
 def fetchPriceData(
-    ticker: str, startDate: datetime, endDate: datetime, retries: int = 2
+    ticker: str,
+    startDate: datetime | None,
+    endDate: datetime,
+    retries: int = 2,
 ) -> pd.DataFrame | None:
-    """Fetch OHLCV data from yfinance for a date range."""
+    """Fetch OHLCV data from yfinance.
+
+    When startDate is None, yfinance requests maximum available history.
+    """
     for attempt in range(retries):
         try:
             stock = yf.Ticker(ticker)
-            df = stock.history(start=startDate, end=endDate)
+
+            if startDate is None:
+                df = stock.history(period="max", end=endDate)
+            else:
+                df = stock.history(start=startDate, end=endDate)
 
             if df.empty:
                 return None
 
-            # Flatten MultiIndex columns if present
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
 
-            # Rename columns to lowercase
-            df = df.rename(columns={
-                "Open": "open",
-                "High": "high",
-                "Low": "low",
-                "Close": "close",
-                "Volume": "volume",
-                "Dividends": "dividends",
-                "Stock Splits": "stock_splits",
-            })
+            df = df.rename(
+                columns={
+                    "Open": "open",
+                    "High": "high",
+                    "Low": "low",
+                    "Close": "close",
+                    "Volume": "volume",
+                    "Adj Close": "adj_close",
+                }
+            )
 
-            # Keep only OHLCV columns
             keepCols = ["open", "high", "low", "close", "volume"]
             for col in keepCols:
                 if col not in df.columns:
                     df[col] = 0
 
             df = df[keepCols].copy()
-
-            # Add ticker and date
-            df["ticker"] = ticker
-            df["price_date"] = df.index.strftime("%Y-%m-%d")
+            df["ticker"] = ticker.upper()
+            df["price_date"] = pd.to_datetime(df.index).strftime("%Y-%m-%d")
             df = df.reset_index(drop=True)
 
-            # Add adjusted close if available
             try:
-                adj_close = stock.info.get("adj_close") or stock.info.get("adjClose")
-                if adj_close is None:
-                    df["adj_close"] = df["close"]
-                else:
-                    df["adj_close"] = adj_close
+                adjusted = stock.history(
+                    **({"period": "max"} if startDate is None else {"start": startDate, "end": endDate}),
+                    auto_adjust=False,
+                )
+                if isinstance(adjusted.columns, pd.MultiIndex):
+                    adjusted.columns = adjusted.columns.get_level_values(0)
+                adjusted.index = pd.to_datetime(adjusted.index).strftime("%Y-%m-%d")
+                adj_series = pd.to_numeric(adjusted["Adj Close"], errors="coerce")
+                adj_map = adj_series.to_dict()
+                df["adj_close"] = [
+                    adj_map.get(date, close)
+                    for date, close in zip(df["price_date"], df["close"])
+                ]
             except Exception:
                 df["adj_close"] = df["close"]
 
@@ -132,7 +177,7 @@ def uploadToSupabase(
     df: pd.DataFrame,
     batchSize: int = 500,
 ) -> int:
-    """Upload price data to Supabase. Uses insert which handles duplicates gracefully."""
+    """Upload price data to Supabase, skipping duplicate rows."""
     if df.empty:
         return 0
 
@@ -140,49 +185,56 @@ def uploadToSupabase(
     now = datetime.now(timezone.utc).isoformat()
 
     for _, row in df.iterrows():
-        records.append({
-            "ticker": ticker,
-            "price_date": row["price_date"],
-            "open": float(row["open"]),
-            "high": float(row["high"]),
-            "low": float(row["low"]),
-            "close": float(row["close"]),
-            "adj_close": float(row["adj_close"]) if pd.notna(row["adj_close"]) else float(row["close"]),
-            "volume": int(row["volume"]),
-            "inserted_at": now,
-        })
+        records.append(
+            {
+                "ticker": ticker.upper(),
+                "price_date": row["price_date"],
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "adj_close": (
+                    float(row["adj_close"])
+                    if pd.notna(row["adj_close"])
+                    else float(row["close"])
+                ),
+                "volume": int(row["volume"]),
+                "inserted_at": now,
+            }
+        )
 
     inserted = 0
     for i in range(0, len(records), batchSize):
-        batch = records[i:i + batchSize]
+        batch = records[i : i + batchSize]
         try:
             client.table("stock_prices").insert(batch).execute()
             inserted += len(batch)
-        except Exception as e:
-            # Insert failed - try inserting non-duplicate records one by one
+        except Exception as exc:
+            print(f"    Error inserting batch for {ticker}: {exc}")
             for record in batch:
                 try:
                     client.table("stock_prices").insert(record).execute()
                     inserted += 1
                 except Exception:
-                    # Skip duplicates (already exists)
+                    # Existing logical rows are skipped.
                     pass
 
     return inserted
 
 
-def processTicker(client: supabase.Client, ticker: str, years_of_history: int = 5, force: bool = False, max_days_stale: int = 3) -> dict[str, Any]:
-    """Process a single ticker: fetch historical data and upload to Supabase.
+def processTicker(
+    client: supabase.Client,
+    ticker: str,
+    years_of_history: int | None = None,
+    force: bool = False,
+    max_days_stale: int = 3,
+) -> dict[str, Any]:
+    """Backfill and update one ticker.
 
-    Args:
-        client: Supabase client
-        ticker: Stock ticker symbol
-        years_of_history: Number of years of history to fetch (default 5)
-        force: If True, ignore existing data and fetch fresh history
-        max_days_stale: Maximum days old data can be before updating (default 3)
+    years_of_history=None is the default and means maximum available
+    yfinance history. A positive value keeps the bounded historical mode.
     """
-    from datetime import timedelta
-
+    ticker = ticker.upper()
     result = {
         "ticker": ticker,
         "fetched": 0,
@@ -192,82 +244,114 @@ def processTicker(client: supabase.Client, ticker: str, years_of_history: int = 
     }
 
     try:
-        # Get the latest date already stored for this ticker
-        latestDate = getLatestPriceDate(client, ticker)
         today = datetime.now(timezone.utc)
-
-        # Calculate start date (5 years back from today)
-        startDate = today.replace(year=today.year - years_of_history)
         staleDate = today - timedelta(days=max_days_stale)
+        requestedStart = (
+            None
+            if years_of_history is None
+            else today - timedelta(days=365 * years_of_history)
+        )
 
-        if force and latestDate is not None:
-            # Force refresh - delete existing data first
-            print(f"  {ticker}: Force refresh, deleting existing data and fetching from {startDate.date()} to {today.date()}")
-            try:
-                client.table("stock_prices").delete().eq("ticker", ticker).execute()
-            except Exception as e:
-                print(f"    Warning: Could not delete existing data: {e}")
-        elif force:
-            # Force refresh but no existing data
-            print(f"  {ticker}: Force refresh, fetching from {startDate.date()} to {today.date()}")
-        elif latestDate is None:
-            # No data exists for this ticker - fetch full historical period
-            print(f"  {ticker}: No existing data, fetching from {startDate.date()} to {today.date()}")
+        earliestDate = getEarliestPriceDate(client, ticker)
+        latestDate = getLatestPriceDate(client, ticker)
+
+        if latestDate is None:
+            startDate = requestedStart
+            label = (
+                "maximum available history"
+                if requestedStart is None
+                else f"since {requestedStart.date()}"
+            )
+            print(f"  {ticker}: No existing data, fetching {label} to {today.date()}")
+
         else:
-            # Check if data is stale (older than max_days_stale)
-            is_stale = latestDate.date() < staleDate.date()
+            startDate = latestDate + timedelta(days=1)
 
-            # Check if existing data covers the 5-year period
-            has_enough_history = latestDate >= startDate
+            # With maximum-history mode, backfill the missing prefix without
+            # deleting existing rows. With bounded mode, only backfill to the
+            # requested start when the DB starts too late.
+            if earliestDate is not None and (
+                requestedStart is None or earliestDate > requestedStart
+            ):
+                print(f"  {ticker}: Backfilling history before {earliestDate.date()}")
+                backfill = fetchPriceData(
+                    ticker,
+                    startDate=requestedStart,
+                    endDate=earliestDate,
+                )
+                if backfill is not None and not backfill.empty:
+                    result["fetched"] += len(backfill)
+                    result["inserted"] += uploadToSupabase(
+                        client, ticker, backfill
+                    )
 
-            if has_enough_history and not is_stale:
-                # Already have sufficient historical data AND data is fresh - skip
-                print(f"  {ticker}: Up to date (last date={latestDate.date()}), skipping")
+            if force:
+                startDate = requestedStart
+            elif latestDate.date() >= staleDate.date():
+                print(f"  {ticker}: Up to date through {latestDate.date()}")
                 result["skipped"] = 1
                 return result
-            elif has_enough_history and is_stale:
-                # Have 5 years but data is stale - fetch recent data only
-                recent_start = latestDate + timedelta(days=1)
-                print(f"  {ticker}: Data stale (last date={latestDate.date()}), fetching from {recent_start.date()} to {today.date()}")
-                startDate = recent_start
             else:
-                # Have partial data - fetch from 5 years ago
-                print(f"  {ticker}: Last date={latestDate.date()}, fetching from {startDate.date()} to {today.date()}")
+                print(
+                    f"  {ticker}: Updating recent data from "
+                    f"{startDate.date()} to {today.date()}"
+                )
 
-        # Fetch data from yfinance
-        df = fetchPriceData(ticker, startDate, today)
-        if df is None or df.empty:
-            print(f"  {ticker}: No new data fetched")
+        if startDate is not None and startDate.date() >= today.date():
+            print(f"  {ticker}: Already up to date")
+            result["skipped"] = 1
             return result
 
-        result["fetched"] = len(df)
+        df = fetchPriceData(
+            ticker,
+            startDate=startDate,
+            endDate=today,
+        )
+        if df is None or df.empty:
+            print(f"  {ticker}: No data fetched")
+            return result
 
-        # Upload to Supabase
-        inserted = uploadToSupabase(client, ticker, df)
-        result["inserted"] = inserted
+        result["fetched"] += len(df)
+        result["inserted"] += uploadToSupabase(client, ticker, df)
+        print(
+            f"  {ticker}: fetched={result['fetched']}, "
+            f"inserted={result['inserted']}"
+        )
 
-        print(f"  {ticker}: fetched={result['fetched']}, inserted={inserted}")
-
-    except Exception as e:
-        result["error"] = str(e)
-        print(f"  {ticker}: ERROR - {e}")
+    except Exception as exc:
+        result["error"] = str(exc)
+        print(f"  {ticker}: ERROR - {exc}")
 
     return result
 
 
 def main() -> None:
-    """Main entry point."""
+    """Load maximum available history for every active ticker."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Load historical stock data")
-    parser.add_argument("--force", action="store_true", help="Force refresh all tickers, ignoring existing data")
+    parser = argparse.ArgumentParser(
+        description="Load maximum available historical stock data"
+    )
+    parser.add_argument(
+        "--years",
+        type=int,
+        default=None,
+        help="Optional bounded history in years; default is maximum available yfinance history.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Refresh the requested range; existing rows are preserved.",
+    )
     args = parser.parse_args()
 
-    client = getSupabaseClient()
+    if args.years is not None and args.years <= 0:
+        parser.error("--years must be greater than zero")
 
-    # Fetch active tickers from Supabase
+    client = getSupabaseClient()
     tickers = getActiveTickers(client)
-    print(f"Found {len(tickers)} active tickers in stocks table\n")
+    print(f"Found {len(tickers)} active tickers in stocks table
+")
 
     totalInserted = 0
     totalFetched = 0
@@ -275,7 +359,12 @@ def main() -> None:
 
     for i, ticker in enumerate(tickers, 1):
         print(f"[{i}/{len(tickers)}] Processing {ticker}...")
-        result = processTicker(client, ticker, force=args.force)
+        result = processTicker(
+            client,
+            ticker,
+            years_of_history=args.years,
+            force=args.force,
+        )
 
         totalFetched += result["fetched"]
         totalInserted += result["inserted"]
@@ -283,11 +372,11 @@ def main() -> None:
         if result["error"]:
             errors.append(result)
 
-        # Rate limiting - be nice to yfinance
         time.sleep(0.3)
 
-    print(f"\n{'=' * 50}")
-    print(f"SUMMARY:")
+    print(f"
+{'=' * 50}")
+    print("SUMMARY:")
     print(f"  Total tickers processed: {len(tickers)}")
     print(f"  Total records fetched: {totalFetched}")
     print(f"  Total records inserted: {totalInserted}")
@@ -295,9 +384,10 @@ def main() -> None:
     print(f"{'=' * 50}")
 
     if errors:
-        print("\nFailed tickers:")
-        for e in errors:
-            print(f"  {e['ticker']}: {e['error']}")
+        print("
+Failed tickers:")
+        for error in errors:
+            print(f"  {error['ticker']}: {error['error']}")
 
 
 if __name__ == "__main__":
