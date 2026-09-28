@@ -65,6 +65,8 @@ def fetch_price_history(
     for column in ("open", "high", "low", "close", "volume"):
         df[column] = pd.to_numeric(df[column], errors="coerce")
     df = df.dropna(subset=["open", "high", "low", "close", "volume"])
+    if limit is None:
+        return df.reset_index(drop=True)
     return df.tail(limit).reset_index(drop=True)
 
 
