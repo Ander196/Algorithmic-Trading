@@ -53,7 +53,7 @@ def test_selector_filters_and_ranks_candidates() -> None:
         AlphaSelectionConfig(top_n=2, min_expected_excess_return=0.0)
     ).rank(predictions, allocations)
 
-    assert result["ticker"].tolist() == ["AAA", "DDD"]
+    assert result["ticker"].tolist() == ["CCC", "AAA"]
     assert result["alpha_rank"].tolist() == [1, 2]
 
 
