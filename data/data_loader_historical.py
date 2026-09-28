@@ -382,8 +382,7 @@ def main() -> None:
     print(f"{'=' * 50}")
 
     if errors:
-        print("
-Failed tickers:")
+        print("\nFailed tickers:")
         for error in errors:
             print(f"  {error['ticker']}: {error['error']}")
 
