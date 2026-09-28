@@ -350,8 +350,7 @@ def main() -> None:
 
     client = getSupabaseClient()
     tickers = getActiveTickers(client)
-    print(f"Found {len(tickers)} active tickers in stocks table
-")
+    print(f"Found {len(tickers)} active tickers in stocks table\n")
 
     totalInserted = 0
     totalFetched = 0
@@ -374,8 +373,7 @@ def main() -> None:
 
         time.sleep(0.3)
 
-    print(f"
-{'=' * 50}")
+    print(f"\n{'=' * 50}")
     print("SUMMARY:")
     print(f"  Total tickers processed: {len(tickers)}")
     print(f"  Total records fetched: {totalFetched}")
