@@ -15,16 +15,25 @@ not survivorship-bias-free and must be treated as a research limitation.
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass
 
 import pandas as pd
+from dotenv import load_dotenv
 from supabase import Client
 
 from core.alpha_dataset import AlphaDatasetBuilder, AlphaDatasetConfig
-from core.alpha_evaluation import AlphaEvaluationConfig, AlphaEvaluationReport, AlphaEvaluator
+from core.alpha_evaluation import (
+    AlphaEvaluationConfig,
+    AlphaEvaluationReport,
+    AlphaEvaluator,
+)
 from core.alpha_model import AlphaModelConfig
 from core.walk_forward import WalkForwardConfig, WalkForwardProtocol
 from jobs.common import fetch_price_history, get_supabase_client
+
+# Local CLI behaviour is kept consistent with the existing ingestion scripts.
+load_dotenv(".env.secrets")
 
 
 @dataclass(frozen=True)
@@ -199,9 +208,18 @@ def _print_report(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate the V1 Alpha model on Supabase history")
-    parser.add_argument("--market-ticker", default="SPY")
-    parser.add_argument("--history-limit", type=int, default=1500)
+    parser = argparse.ArgumentParser(
+        description="Evaluate the V1 Alpha model on Supabase history"
+    )
+    parser.add_argument(
+        "--market-ticker",
+        default=os.getenv("MARKET_TICKER", "SPY"),
+    )
+    parser.add_argument(
+        "--history-limit",
+        type=int,
+        default=int(os.getenv("ALPHA_HISTORY_BARS", "1500")),
+    )
     parser.add_argument(
         "--max-tickers",
         type=int,
