@@ -48,12 +48,14 @@ def _row(day: str, close: float) -> dict:
 
 
 def test_fetch_price_history_none_reads_all_pages() -> None:
-    first = [_row("2024-01-03", 3)]
+    first = [_row("2024-01-03", 3)] * 1000
+    first[0] = _row("2024-01-03", 3)
     second = [_row("2024-01-02", 2)]
 
     client = _FakeClient(
         {
-            (0, 999): first + second,
+            (0, 999): first,
+            (1000, 1999): second,
         }
     )
 
