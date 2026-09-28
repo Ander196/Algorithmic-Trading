@@ -25,6 +25,9 @@ from core.alpha_evaluation import AlphaEvaluationConfig, AlphaEvaluationReport, 
 from core.alpha_model import AlphaModelConfig
 from core.walk_forward import WalkForwardConfig, WalkForwardProtocol
 from jobs.common import fetch_price_history, get_supabase_client
+from dotenv import load_dotenv
+
+load_dotenv(".env.secrets")
 
 
 @dataclass(frozen=True)
