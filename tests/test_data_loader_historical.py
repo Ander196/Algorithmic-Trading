@@ -37,7 +37,10 @@ def test_process_ticker_defaults_to_maximum_available_history(monkeypatch):
     )
 
     assert result["skipped"] == 1
-    assert calls == []
+    assert len(calls) == 1
+    assert calls[0][0] == "AAPL"
+    assert calls[0][1] is None
+    assert calls[0][2] == datetime(2021, 1, 1, tzinfo=timezone.utc)
 
 
 def test_fetch_price_data_uses_period_max_when_start_is_none(monkeypatch):
