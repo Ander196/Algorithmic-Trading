@@ -19,23 +19,29 @@ def get_supabase_client() -> Client:
 def fetch_price_history(
     client: Client,
     ticker: str,
-    limit: int = 1500,
+    limit: int | None = 1500,
 ) -> pd.DataFrame:
-    """Read the most recent OHLCV history, handling Supabase pagination.
+    """Read OHLCV history, handling Supabase pagination.
 
-    The query is ordered newest-first so the requested ``limit`` contains the
-    latest observations. The returned DataFrame is then sorted chronologically
-    because downstream rolling features and stateful models expect time order.
+    limit controls how many of the most recent observations are returned.
+    When limit is None, all available observations are fetched.
+    The query is ordered newest-first so pagination starts with the latest
+    observations. The returned DataFrame is then sorted chronologically because
+    downstream rolling features and stateful models expect time order.
     """
-    if limit <= 0:
-        raise ValueError("limit must be greater than zero")
+    if limit is not None and limit <= 0:
+        raise ValueError("limit must be greater than zero when provided")
 
     rows: list[dict] = []
     page_size = 1000
     offset = 0
 
-    while len(rows) < limit:
-        end = min(offset + page_size, limit) - 1
+    while limit is None or len(rows) < limit:
+        end = (
+            offset + page_size - 1
+            if limit is None
+            else min(offset + page_size, limit) - 1
+        )
         response = (
             client.table("stock_prices")
             .select("price_date,open,high,low,close,volume")
@@ -59,6 +65,8 @@ def fetch_price_history(
     for column in ("open", "high", "low", "close", "volume"):
         df[column] = pd.to_numeric(df[column], errors="coerce")
     df = df.dropna(subset=["open", "high", "low", "close", "volume"])
+    if limit is None:
+        return df.reset_index(drop=True)
     return df.tail(limit).reset_index(drop=True)
 
 

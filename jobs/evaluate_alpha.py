@@ -74,12 +74,9 @@ def load_alpha_inputs(
     client: Client,
     tickers: list[str],
     market_ticker: str,
-    history_limit: int = 1500,
+    history_limit: int | None = None,
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame, AlphaLoadSummary]:
     """Load market and stock histories needed by the Alpha dataset builder."""
-    if history_limit <= 0:
-        raise ValueError("history_limit must be greater than zero")
-
     market_raw = fetch_price_history(client, market_ticker, limit=history_limit)
     market_data = _to_ohlcv_frame(market_raw)
 
@@ -109,7 +106,7 @@ def load_alpha_inputs(
 def evaluate_alpha(
     client: Client,
     market_ticker: str = "SPY",
-    history_limit: int = 1500,
+    history_limit: int | None = None,
     max_tickers: int | None = None,
 ) -> tuple[AlphaEvaluationReport, AlphaLoadSummary, int]:
     """Build the real-data Alpha dataset and return its OOS evaluation report."""
@@ -201,7 +198,12 @@ def _print_report(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate the V1 Alpha model on Supabase history")
     parser.add_argument("--market-ticker", default="SPY")
-    parser.add_argument("--history-limit", type=int, default=1500)
+    parser.add_argument(
+        "--history-limit",
+        type=int,
+        default=None,
+        help="Optional cap on recent bars; default uses all available Supabase history.",
+    )
     parser.add_argument(
         "--max-tickers",
         type=int,
