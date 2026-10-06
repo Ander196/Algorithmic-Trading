@@ -2,7 +2,7 @@
   "schema_version": 1,
   "model_type": "StockRiskModel",
   "ticker": "ITX.MC",
-  "market_model_version": "bf7f1e6d256978ba",
+  "market_model_version": "a26c32c12767a000",
   "created_at": "2026-09-19T22:58:10.879254+00:00",
   "config": {
     "vol_window": 21,
