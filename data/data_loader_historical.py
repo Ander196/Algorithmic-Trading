@@ -197,8 +197,15 @@ def uploadToSupabase(
     batchSize: int = 500,
 ) -> int:
     """Upload price data to Supabase, skipping duplicate rows."""
-    if df.empty:
+    ticker = normalize_ticker(ticker)
+    if is_excluded_ticker(ticker):
+        print(f"  {ticker}: refusing to upload excluded price history")
         return 0
+
+    df = validate_ohlcv_frame(df, ticker)
+    if df is None or df.empty:
+        return 0
+
 
     records = []
     now = datetime.now(timezone.utc).isoformat()
