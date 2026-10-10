@@ -1,8 +1,7 @@
-import pandas as pd
-
 from data.excluded_tickers import EXCLUDED_TICKERS, is_excluded_ticker, normalize_ticker
 from data.data_loader import processTicker as process_incremental_ticker
 from data.data_loader_historical import processTicker as process_historical_ticker
+from data import ticker_loader
 
 
 def test_exclusion_list_contains_all_18_confirmed_bad_tickers():
@@ -37,3 +36,27 @@ def test_historical_loader_skips_excluded_ticker_before_database_access():
     assert result["fetched"] == 0
     assert result["inserted"] == 0
     assert result["error"] is None
+
+def test_ticker_catalog_fetch_filters_excluded_symbols(monkeypatch):
+    looked_up = []
+
+    def fake_fetch(ticker):
+        looked_up.append(ticker)
+        return {
+            "ticker": ticker,
+            "name": ticker,
+            "exchange": "TEST",
+            "sector": "TEST",
+            "industry": "TEST",
+        }
+
+    monkeypatch.setattr(ticker_loader, "fetchTickerInfo", fake_fetch)
+
+    frame = ticker_loader.fetchAllTickers(
+        [" abi.br ", "AAPL", "ULVR.L"],
+        batchSize=50,
+        delay=0,
+    )
+
+    assert looked_up == ["AAPL"]
+    assert frame["ticker"].tolist() == ["AAPL"]
