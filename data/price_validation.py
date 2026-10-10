@@ -75,7 +75,7 @@ def audit_ohlcv_frame(data: pd.DataFrame | None, ticker: str = "") -> OHLCVAudit
         add_reason(non_finite, "non_finite_ohlc_values" if column in PRICE_COLUMNS else "non_finite_volume")
 
     prices = pd.DataFrame({column: numeric[column] for column in PRICE_COLUMNS}, index=frame.index)
-    price_matrix = prices.to_numpy(dtype=float)
+    price_matrix = prices.to_numpy(dtype=float, na_value=np.nan)
     finite_prices = np.isfinite(price_matrix).all(axis=1)
     positive_prices = (price_matrix > 0).all(axis=1)
     add_reason(
@@ -83,14 +83,14 @@ def audit_ohlcv_frame(data: pd.DataFrame | None, ticker: str = "") -> OHLCVAudit
         "non_positive_ohlc_values",
     )
 
-    volume = numeric["volume"].to_numpy(dtype=float)
+    volume = numeric["volume"].to_numpy(dtype=float, na_value=np.nan)
     add_reason(np.isfinite(volume) & (volume < 0), "negative_volume")
 
     if "adj_close" in frame.columns:
         raw_adj = frame["adj_close"]
         adj = pd.to_numeric(raw_adj, errors="coerce")
         add_reason((raw_adj.notna() & adj.isna()).to_numpy(), "non_numeric_adj_close")
-        adj_values = adj.to_numpy(dtype=float)
+        adj_values = adj.to_numpy(dtype=float, na_value=np.nan)
         add_reason(
             np.isfinite(adj_values) & (adj_values <= 0),
             "non_positive_adj_close",
