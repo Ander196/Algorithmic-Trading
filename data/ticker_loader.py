@@ -21,6 +21,8 @@ import supabase
 import yfinance as yf
 from dotenv import load_dotenv
 
+from data.excluded_tickers import EXCLUDED_TICKERS, is_excluded_ticker, normalize_ticker
+
 load_dotenv(".env.secrets")
 
 
@@ -137,7 +139,8 @@ def fetchTickerInfo(ticker: str, retries: int = 2) -> dict | None:
 
 
 def fetchAllTickers(tickers: list[str], batchSize: int = 50, delay: float = 0.5) -> pd.DataFrame:
-    """Fetch info for all tickers with batching and rate limiting."""
+    """Fetch non-excluded ticker info with batching and rate limiting."""
+    tickers = [normalize_ticker(t) for t in tickers if t and not is_excluded_ticker(t)]
     results = []
     total = len(tickers)
 
@@ -230,6 +233,12 @@ def main() -> None:
 
     # Initialize Supabase client
     client = supabase.create_client(supabaseUrl, supabaseKey)
+
+    # Enforce the exclusion in the database too; do not let a catalog refresh
+    # reactivate symbols whose price history was intentionally removed.
+    client.table("stocks").update({"is_active": False}).in_(
+        "ticker", sorted(EXCLUDED_TICKERS)
+    ).execute()
 
     # Fetch ticker info
     df = fetchAllTickers(ALL_TICKERS)
