@@ -47,7 +47,7 @@ def _rows(count):
             "price_date": date.isoformat(),
             "open": float(i + 1),
             "high": float(i + 2),
-            "low": float(i),
+            "low": max(0.5, float(i)),
             "close": float(i + 1.5),
             "volume": float(100 + i),
         }
@@ -94,6 +94,15 @@ def test_fetch_price_history_limit_caps_rows_and_keeps_latest_observations():
 def test_fetch_price_history_rejects_non_positive_limit(limit):
     with pytest.raises(ValueError, match="limit must be greater than zero"):
         fetch_price_history(_FakeClient(_rows(1)), "AAPL", limit=limit)
+
+
+def test_fetch_price_history_rejects_excluded_tickers_before_querying():
+    client = _FakeClient(_rows(5))
+
+    with pytest.raises(RuntimeError, match="ABI.BR is excluded"):
+        fetch_price_history(client, " abi.br ", limit=None)
+
+    assert client.ranges == []
 
 
 def test_fetch_price_history_raises_when_ticker_has_no_history():
