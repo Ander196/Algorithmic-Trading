@@ -116,6 +116,63 @@ def source_bar_invalid_reasons(bar: pd.Series) -> list[str]:
     return []
 
 
+def _high_low_swap_proposal(original: pd.Series) -> dict[str, float] | None:
+    """Suggest (but never auto-apply) a pure High/Low swap when it fixes geometry."""
+    try:
+        open_price = float(original["open"])
+        high_price = float(original["high"])
+        low_price = float(original["low"])
+        close_price = float(original["close"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    values = (open_price, high_price, low_price, close_price)
+    if not all(np.isfinite(value) and value > 0 for value in values):
+        return None
+    if high_price >= low_price:
+        return None
+
+    proposed_high = low_price
+    proposed_low = high_price
+    if proposed_high < max(open_price, proposed_low, close_price):
+        return None
+    if proposed_low > min(open_price, proposed_high, close_price):
+        return None
+
+    proposal = {
+        "open": open_price,
+        "high": proposed_high,
+        "low": proposed_low,
+        "close": close_price,
+    }
+    for column in ("adj_close", "volume"):
+        try:
+            proposal[column] = float(original[column])
+        except (KeyError, TypeError, ValueError):
+            pass
+    return proposal
+
+
+def _set_manual_swap_review(
+    report: dict,
+    original: pd.Series,
+    explanation: str,
+) -> bool:
+    """Populate a non-mutating swap candidate for manual inspection."""
+    proposal = _high_low_swap_proposal(original)
+    if proposal is None:
+        return False
+
+    for column, value in proposal.items():
+        report[f"proposed_{column}"] = value
+    report["repair_status"] = "manual_review_high_low_swap"
+    report["repair_error"] = (
+        "Swapping stored high/low would restore OHLC geometry; "
+        + explanation
+    )
+    return True
+
+
 def _normalize_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
     missing = INPUT_REQUIRED_COLUMNS - set(candidates.columns)
     if missing:
@@ -180,14 +237,35 @@ def repair_candidates(
                 report[column] = original.get(column, np.nan)
                 report[f"proposed_{column}"] = np.nan
 
+            try:
+                existing_volume = float(original["volume"])
+            except (KeyError, TypeError, ValueError):
+                existing_volume = np.nan
+
+            # Do not automatically replace anomalous zero-volume rows, even
+            # when the provider has a bar for that date; they need inspection.
+            if np.isfinite(existing_volume) and existing_volume == 0:
+                report["repair_status"] = "manual_review_existing_zero_volume"
+                report["repair_error"] = (
+                    "The stored bar has zero volume; manual review is required."
+                )
+                reports.append(report)
+                continue
+
             if fetch_error is not None:
-                report["repair_status"] = "provider_fetch_error"
-                report["repair_error"] = fetch_error
+                if not _set_manual_swap_review(
+                    report, original, f"provider fetch failed: {fetch_error}"
+                ):
+                    report["repair_status"] = "provider_fetch_error"
+                    report["repair_error"] = fetch_error
                 reports.append(report)
                 continue
 
             if date not in provider.index:
-                report["repair_status"] = "provider_bar_not_found"
+                if not _set_manual_swap_review(
+                    report, original, "no provider bar was found for this session."
+                ):
+                    report["repair_status"] = "provider_bar_not_found"
                 reports.append(report)
                 continue
 
@@ -196,8 +274,13 @@ def repair_candidates(
                 source_bar = source_bar.iloc[-1]
             reasons = source_bar_invalid_reasons(source_bar)
             if reasons:
-                report["repair_status"] = "provider_bar_invalid"
-                report["repair_error"] = ",".join(reasons)
+                if not _set_manual_swap_review(
+                    report,
+                    original,
+                    "the provider bar is invalid: " + ",".join(reasons),
+                ):
+                    report["repair_status"] = "provider_bar_invalid"
+                    report["repair_error"] = ",".join(reasons)
                 reports.append(report)
                 continue
 
