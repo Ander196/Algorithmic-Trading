@@ -187,10 +187,22 @@ def uploadToSupabase(df: pd.DataFrame, client: supabase.Client) -> tuple[int, in
         df = df.loc[~df["ticker"].map(is_excluded_ticker)].copy()
 
     existingTickers = getExistingTickers(client)
-    now = getNowTimestamptz()
     newCount = 0
     deactivatedCount = 0
 
+    # Do not deactivate the entire universe if a catalog fetch returns no
+    # eligible symbols. Still ensure the permanent blocklist stays inactive.
+    if df.empty:
+        excluded_existing = {
+            ticker for ticker in existingTickers if is_excluded_ticker(ticker)
+        }
+        for ticker in excluded_existing:
+            client.table("stocks").update({"is_active": False}).eq(
+                "ticker", ticker
+            ).execute()
+        return 0, len(excluded_existing)
+
+    now = getNowTimestamptz()
     print(f"\nExisting tickers in DB: {len(existingTickers)}")
     print(f"New tickers to upload: {len(df)}")
 
