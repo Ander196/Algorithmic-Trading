@@ -40,7 +40,7 @@ SELECT
     COUNT(*) FILTER (
         WHERE price_date < DATE '2000-01-01'
           AND UPPER(BTRIM(ticker)) <> ALL(ARRAY[
-            'ABI.BR', 'ACA.PA', 'ITX.MC, 'UCG.MI',
+            'ABI.BR', 'ACA.PA', 'ITX.MC'UCG.MI',
             'AZN.L', 'BATS.L', 'BP.L', 'BT-A.L', 'GSK.L', 'HSBA.L',
             'LSEG.L', 'NG.L', 'PRU.L', 'REL.L', 'RIO.L', 'SHEL.L',
             'ULVR.L', 'VOD.L'
