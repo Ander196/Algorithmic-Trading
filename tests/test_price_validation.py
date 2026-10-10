@@ -71,6 +71,44 @@ def test_audit_distinguishes_missing_columns_from_bad_rows():
     assert audit.reason_counts == {"missing_required_columns": 1}
     assert audit.invalid_row_count == 0
 
+
+def test_audit_classifies_missing_negative_and_inconsistent_values():
+    frame = _valid_frame()
+    frame.loc[0, "open"] = 0
+    frame.loc[1, "volume"] = -1
+    frame.loc[2, "high"] = 10
+
+    audit = audit_ohlcv_frame(frame, "TEST")
+
+    assert audit.invalid_row_count == 3
+    assert audit.reason_counts["non_positive_ohlc_values"] == 1
+    assert audit.reason_counts["negative_volume"] == 1
+    assert audit.reason_counts["high_below_ohlc_max"] == 1
+    assert all(audit.invalid_rows["validation_reasons"].map(bool))
+
+
+def test_audit_distinguishes_missing_columns_from_bad_rows():
+    frame = _valid_frame().drop(columns=["high"])
+
+    audit = audit_ohlcv_frame(frame, "TEST")
+
+    assert audit.missing_columns == ("high",)
+    assert audit.reason_counts == {"missing_required_columns": 1}
+    assert audit.invalid_row_count == 0
+
+
+def test_audit_classifies_non_numeric_non_finite_and_missing_values():
+    frame = _valid_frame()
+    frame.loc[0, "open"] = "not-a-price"
+    frame.loc[1, "volume"] = float("inf")
+    frame.loc[2, "close"] = None
+
+    audit = audit_ohlcv_frame(frame, "TEST")
+
+    assert audit.reason_counts["non_numeric_ohlc_values"] == 1
+    assert audit.reason_counts["non_finite_volume"] == 1
+    assert audit.reason_counts["missing_ohlc_values"] == 1
+
 def test_validator_keeps_valid_positive_ohlcv_rows():
     frame = _valid_frame()
 
