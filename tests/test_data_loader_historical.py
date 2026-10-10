@@ -9,6 +9,14 @@ from data import data_loader_historical as loader
 def test_process_ticker_defaults_to_maximum_available_history(monkeypatch):
     calls = []
 
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            # Keep the stored 2026-09-25 observation fresh throughout the test.
+            return cls(2026, 9, 27, tzinfo=tz)
+
+    monkeypatch.setattr(loader, "datetime", FrozenDateTime)
+
     class FakeClient:
         pass
 
