@@ -212,17 +212,32 @@ def repair_candidates(
             for column, value in proposed.items():
                 report[f"proposed_{column}"] = value
 
+            # Zero-volume bars are uncommon and may indicate synthetic
+            # holiday/stale observations. Do not auto-update them without review.
+            if proposed["volume"] == 0:
+                report["repair_status"] = "manual_review_zero_volume"
+                reports.append(report)
+                continue
+
             report["repair_status"] = "would_update"
             if apply:
                 try:
-                    (
+                    response = (
                         client.table("stock_prices")
                         .update(proposed)
                         .eq("ticker", ticker)
                         .eq("price_date", date)
+                        .select("ticker,price_date")
                         .execute()
                     )
-                    report["repair_status"] = "updated"
+                    updated_rows = getattr(response, "data", None) or []
+                    if len(updated_rows) != 1:
+                        report["repair_status"] = "update_not_confirmed"
+                        report["repair_error"] = (
+                            f"expected one updated row, received {len(updated_rows)}"
+                        )
+                    else:
+                        report["repair_status"] = "updated"
                 except Exception as exc:
                     report["repair_status"] = "update_error"
                     report["repair_error"] = str(exc)
