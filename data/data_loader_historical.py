@@ -4,9 +4,9 @@ Historical OHLCV loader for all active tickers.
 The loader:
 - reads active tickers from the Supabase stocks table;
 - preserves existing history in stock_prices;
-- backfills older data from yfinance when available;
+- backfills from 2000-01-01 where history is missing;
 - fetches recent data from the latest stored date through today;
-- uses maximum available yfinance history by default.
+- excludes tickers known to have invalid historical prices.
 
 Usage:
     python -m data.data_loader_historical
@@ -358,13 +358,13 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Load maximum available historical stock data"
+        description="Load stock history from 2000-01-01 onwards"
     )
     parser.add_argument(
         "--years",
         type=int,
         default=None,
-        help="Optional bounded history in years; default is maximum available yfinance history.",
+        help="Optional shorter history window in years; default starts at 2000-01-01.",
     )
     parser.add_argument(
         "--force",
