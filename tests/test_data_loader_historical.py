@@ -6,7 +6,7 @@ import pandas as pd
 from data import data_loader_historical as loader
 
 
-def test_process_ticker_defaults_to_maximum_available_history(monkeypatch):
+def test_process_ticker_defaults_to_history_since_2000(monkeypatch):
     calls = []
 
     class FrozenDateTime(datetime):
