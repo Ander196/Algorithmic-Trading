@@ -19,13 +19,14 @@ def get_supabase_client() -> Client:
 def fetch_price_history(
     client: Client,
     ticker: str,
-    limit: int | None = None,
+    limit: int | None = 1500,
 ) -> pd.DataFrame:
     """Read OHLCV history using Supabase pagination.
 
-    By default, fetch every available row for ``ticker``. When ``limit`` is
-    provided, the query returns at most the most recent ``limit`` observations.
-    Results are returned in chronological order for rolling features and models.
+    By default, fetch the most recent 1500 rows for compatibility with other
+    jobs. Pass ``limit=None`` to fetch every available row. An explicit positive
+    limit caps the result to the most recent observations. Results are returned
+    chronologically for rolling features and models.
     """
     if limit is not None and limit <= 0:
         raise ValueError("limit must be greater than zero")
