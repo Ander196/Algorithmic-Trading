@@ -77,10 +77,10 @@ def load_alpha_inputs(
     client: Client,
     tickers: list[str],
     market_ticker: str,
-    history_limit: int = 1500,
+    history_limit: int | None = None,
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame, AlphaLoadSummary]:
     """Load market and stock histories needed by the Alpha dataset builder."""
-    if history_limit <= 0:
+    if history_limit is not None and history_limit <= 0:
         raise ValueError("history_limit must be greater than zero")
 
     market_raw = fetch_price_history(client, market_ticker, limit=history_limit)
@@ -204,7 +204,12 @@ def _print_report(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate the V1 Alpha model on Supabase history")
     parser.add_argument("--market-ticker", default="SPY")
-    parser.add_argument("--history-limit", type=int, default=1500)
+    parser.add_argument(
+        "--history-limit",
+        type=int,
+        default=None,
+        help="Optional maximum number of rows per ticker; default loads all available history.",
+    )
     parser.add_argument(
         "--max-tickers",
         type=int,
