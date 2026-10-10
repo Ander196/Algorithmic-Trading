@@ -85,6 +85,19 @@ def test_audit_classifies_non_numeric_non_finite_and_missing_values():
     assert audit.reason_counts["missing_ohlc_values"] == 1
 
 
+
+def test_validator_normalizes_numeric_strings_in_valid_rows():
+    frame = _valid_frame()
+    for column in ("open", "high", "low", "close", "volume"):
+        frame[column] = frame[column].astype(str)
+
+    result = validate_ohlcv_frame(frame, "TEST")
+
+    assert result is not None
+    assert pd.api.types.is_numeric_dtype(result["open"])
+    assert pd.api.types.is_numeric_dtype(result["volume"])
+    assert result["close"].tolist() == [11.0, 12.0, 12.5]
+
 def test_validator_keeps_valid_positive_ohlcv_rows():
     frame = _valid_frame()
 
