@@ -75,6 +75,20 @@ def test_repair_candidates_refuses_invalid_provider_replacement():
     assert "high_below_ohlc_max" in result.loc[0, "repair_error"]
 
 
+
+def test_repair_candidates_sends_zero_volume_bars_for_manual_review():
+    zero_volume = _provider_history().copy()
+    zero_volume.loc[:, "Volume"] = 0
+
+    result = repair_candidates(
+        _candidate_rows().iloc[[0]],
+        fetcher=lambda *_args: zero_volume,
+    )
+
+    assert result.loc[0, "repair_status"] == "manual_review_zero_volume"
+    assert result.loc[0, "proposed_volume"] == 0
+
+
 def test_apply_requires_a_database_client():
     with pytest.raises(ValueError, match="client is required"):
         repair_candidates(_candidate_rows(), apply=True)
