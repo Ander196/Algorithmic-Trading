@@ -113,7 +113,7 @@ def fetchPriceData(
 ) -> pd.DataFrame | None:
     """Fetch OHLCV data from yfinance.
 
-    When startDate is None, yfinance requests maximum available history.
+    History is bounded to HISTORICAL_START_DATE or the later requested start date.
     """
     for attempt in range(retries):
         try:
@@ -146,7 +146,7 @@ def fetchPriceData(
             if missing:
                 print(
                     f"  {ticker}: rejecting provider response; missing required "
-                    f"columns: {\", \".join(missing)}"
+                    f"columns: {', '.join(missing)}"
                 )
                 return None
 
@@ -156,8 +156,13 @@ def fetchPriceData(
             df = df.reset_index(drop=True)
 
             try:
+                adjusted_start = max(
+                    startDate or HISTORICAL_START_DATE,
+                    HISTORICAL_START_DATE,
+                )
                 adjusted = stock.history(
-                    **({"period": "max"} if startDate is None else {"start": startDate, "end": endDate}),
+                    start=adjusted_start,
+                    end=endDate,
                     auto_adjust=False,
                 )
                 if isinstance(adjusted.columns, pd.MultiIndex):
@@ -245,8 +250,8 @@ def processTicker(
 ) -> dict[str, Any]:
     """Backfill and update one ticker.
 
-    years_of_history=None is the default and means maximum available
-    yfinance history. A positive value keeps the bounded historical mode.
+    years_of_history=None loads all available history from 2000-01-01 onward.
+    A positive value requests a shorter range but never predates that cutoff.
     """
     ticker = normalize_ticker(ticker)
     result = {
