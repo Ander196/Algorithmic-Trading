@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 import pandas as pd
 from supabase import Client, create_client
 
+from data.excluded_tickers import is_excluded_ticker, normalize_ticker
+from data.price_validation import validate_ohlcv_frame
+
 
 def get_supabase_client() -> Client:
     url = os.getenv("SUPABASE_URL")
@@ -28,6 +31,9 @@ def fetch_price_history(
     limit caps the result to the most recent observations. Results are returned
     chronologically for rolling features and models.
     """
+    ticker = normalize_ticker(ticker)
+    if is_excluded_ticker(ticker):
+        raise RuntimeError(f"{ticker} is excluded because its price history is known to be invalid")
     if limit is not None and limit <= 0:
         raise ValueError("limit must be greater than zero")
 
@@ -64,7 +70,9 @@ def fetch_price_history(
     df = df.sort_values("price_date").drop_duplicates("price_date", keep="last")
     for column in ("open", "high", "low", "close", "volume"):
         df[column] = pd.to_numeric(df[column], errors="coerce")
-    df = df.dropna(subset=["open", "high", "low", "close", "volume"])
+    df = validate_ohlcv_frame(df, ticker)
+    if df is None or df.empty:
+        raise RuntimeError(f"No valid OHLCV history found for {ticker}")
     if limit is not None:
         df = df.tail(limit)
     return df.reset_index(drop=True)
