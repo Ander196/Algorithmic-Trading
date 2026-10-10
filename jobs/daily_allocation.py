@@ -18,6 +18,7 @@ import pandas as pd
 from core.hmm_market import MarketRegimeClassifier
 from core.stock_risk import AllocationEngine, StockRiskConfig, StockRiskModel
 from data.data_loader import getActiveTickers
+from data.excluded_tickers import is_excluded_ticker
 from jobs.common import fetch_price_history, get_supabase_client
 from storage.client import storeAllocationResult, storeStockRiskModel
 
@@ -160,7 +161,11 @@ def main() -> None:
         on_conflict="market_ticker,result_date,market_model_version",
     ).execute()
 
-    tickers = [t.upper() for t in getActiveTickers(client) if t.upper() != market_ticker]
+    tickers = [
+        t.upper()
+        for t in getActiveTickers(client)
+        if t.upper() != market_ticker and not is_excluded_ticker(t)
+    ]
     successes = 0
     failures: list[str] = []
 
