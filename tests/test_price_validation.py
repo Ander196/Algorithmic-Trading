@@ -74,6 +74,10 @@ def test_audit_distinguishes_missing_columns_from_bad_rows():
 
 def test_audit_classifies_non_numeric_non_finite_and_missing_values():
     frame = _valid_frame()
+    # Use object columns intentionally so pandas does not warn about incompatible
+    # assignments; this test is specifically exercising bad provider values.
+    frame["open"] = frame["open"].astype(object)
+    frame["volume"] = frame["volume"].astype(object)
     frame.loc[0, "open"] = "not-a-price"
     frame.loc[1, "volume"] = float("inf")
     frame.loc[2, "close"] = None
