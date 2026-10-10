@@ -121,7 +121,14 @@ def audit_ohlcv_frame(data: pd.DataFrame | None, ticker: str = "") -> OHLCVAudit
     invalid["validation_reasons"] = [
         row_reasons[position] for position in np.flatnonzero(invalid_mask)
     ]
-    valid = frame.iloc[np.flatnonzero(~invalid_mask)].copy()
+    valid_positions = np.flatnonzero(~invalid_mask)
+    valid = frame.iloc[valid_positions].copy()
+    # Preserve the previous validator contract: numeric strings are returned
+    # as numeric OHLCV values after they have passed validation.
+    for column in REQUIRED_OHLCV_COLUMNS:
+        valid[column] = numeric[column].iloc[valid_positions].to_numpy(
+            dtype=float, na_value=np.nan
+        )
 
     counts: dict[str, int] = {}
     for reasons in row_reasons:
