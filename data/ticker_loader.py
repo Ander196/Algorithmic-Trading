@@ -183,6 +183,9 @@ def uploadToSupabase(df: pd.DataFrame, client: supabase.Client) -> tuple[int, in
     - Marks missing tickers as is_active=False
     Returns (new_count, deactivated_count)
     """
+    if not df.empty:
+        df = df.loc[~df["ticker"].map(is_excluded_ticker)].copy()
+
     existingTickers = getExistingTickers(client)
     now = getNowTimestamptz()
     newCount = 0
