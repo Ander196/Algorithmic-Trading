@@ -116,7 +116,11 @@ ALL_TICKERS = list(set(US_TICKERS + EU_TICKERS))
 
 
 def fetchTickerInfo(ticker: str, retries: int = 2) -> dict | None:
-    """Fetch stock info from yfinance with retry logic."""
+    """Fetch stock info unless the ticker is explicitly excluded."""
+    ticker = normalize_ticker(ticker)
+    if is_excluded_ticker(ticker):
+        return None
+
     for attempt in range(retries):
         try:
             info = yf.Ticker(ticker).info
