@@ -42,6 +42,15 @@ def validate_ohlcv_frame(
 
     volume = frame["volume"]
     valid &= volume.notna() & np.isfinite(volume) & (volume >= 0)
+
+    # Adj Close is optional in the provider response, but if supplied it must
+    # be either missing (uploader falls back to Close) or a finite positive price.
+    if "adj_close" in frame.columns:
+        adj_close = pd.to_numeric(frame["adj_close"], errors="coerce")
+        valid &= adj_close.isna() | (
+            np.isfinite(adj_close) & (adj_close > 0)
+        )
+
     valid &= frame["high"] >= frame[["open", "low", "close"]].max(axis=1)
     valid &= frame["low"] <= frame[["open", "high", "close"]].min(axis=1)
 
