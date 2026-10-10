@@ -68,13 +68,15 @@ def test_fetch_price_history_none_loads_all_pages_in_chronological_order():
     assert client.ranges == [(0, 999), (1000, 1999), (2000, 2999)]
 
 
-def test_fetch_price_history_default_loads_all_available_rows():
-    client = _FakeClient(_rows(1005))
+def test_fetch_price_history_default_preserves_1500_row_cap():
+    client = _FakeClient(_rows(2001))
 
     frame = fetch_price_history(client, "AAPL")
 
-    assert len(frame) == 1005
-    assert client.ranges == [(0, 999), (1000, 1999)]
+    assert len(frame) == 1500
+    assert frame["price_date"].iloc[0] == pd.Timestamp("2001-05-16", tz="UTC")
+    assert frame["price_date"].iloc[-1] == pd.Timestamp("2005-06-23", tz="UTC")
+    assert client.ranges == [(0, 999), (1000, 1499)]
 
 
 def test_fetch_price_history_limit_caps_rows_and_keeps_latest_observations():
