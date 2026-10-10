@@ -112,7 +112,7 @@ def load_alpha_inputs(
 def evaluate_alpha(
     client: Client,
     market_ticker: str = "SPY",
-    history_limit: int = 1500,
+    history_limit: int | None = None,
     max_tickers: int | None = None,
 ) -> tuple[AlphaEvaluationReport, AlphaLoadSummary, int]:
     """Build the real-data Alpha dataset and return its OOS evaluation report."""
