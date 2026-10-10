@@ -1,6 +1,6 @@
 import pandas as pd
 
-from data.price_validation import validate_ohlcv_frame
+from data.price_validation import audit_ohlcv_frame, validate_ohlcv_frame
 
 
 def _valid_frame():
@@ -45,6 +45,62 @@ def test_validator_removes_rows_with_non_positive_adjusted_close():
     assert result is not None
     assert result["price_date"].tolist() == ["2026-01-01", "2026-01-03"]
 
+
+def test_audit_classifies_non_positive_volume_and_inconsistent_ranges():
+    frame = _valid_frame()
+    frame.loc[0, "open"] = 0
+    frame.loc[1, "volume"] = -1
+    frame.loc[2, "high"] = 10
+
+    audit = audit_ohlcv_frame(frame, "TEST")
+
+    assert audit.invalid_row_count == 3
+    assert audit.reason_counts["non_positive_ohlc_values"] == 1
+    assert audit.reason_counts["negative_volume"] == 1
+    assert audit.reason_counts["high_below_ohlc_max"] == 1
+    assert audit.reason_counts["low_above_ohlc_min"] == 1
+    assert all(audit.invalid_rows["validation_reasons"].map(bool))
+
+
+def test_audit_distinguishes_missing_columns_from_bad_rows():
+    frame = _valid_frame().drop(columns=["high"])
+
+    audit = audit_ohlcv_frame(frame, "TEST")
+
+    assert audit.missing_columns == ("high",)
+    assert audit.reason_counts == {"missing_required_columns": 1}
+    assert audit.invalid_row_count == 0
+
+
+def test_audit_classifies_non_numeric_non_finite_and_missing_values():
+    frame = _valid_frame()
+    # Use object columns intentionally so pandas does not warn about incompatible
+    # assignments; this test is specifically exercising bad provider values.
+    frame["open"] = frame["open"].astype(object)
+    frame["volume"] = frame["volume"].astype(object)
+    frame.loc[0, "open"] = "not-a-price"
+    frame.loc[1, "volume"] = float("inf")
+    frame.loc[2, "close"] = None
+
+    audit = audit_ohlcv_frame(frame, "TEST")
+
+    assert audit.reason_counts["non_numeric_ohlc_values"] == 1
+    assert audit.reason_counts["non_finite_volume"] == 1
+    assert audit.reason_counts["missing_ohlc_values"] == 1
+
+
+
+def test_validator_normalizes_numeric_strings_in_valid_rows():
+    frame = _valid_frame()
+    for column in ("open", "high", "low", "close", "volume"):
+        frame[column] = frame[column].astype(str)
+
+    result = validate_ohlcv_frame(frame, "TEST")
+
+    assert result is not None
+    assert pd.api.types.is_numeric_dtype(result["open"])
+    assert pd.api.types.is_numeric_dtype(result["volume"])
+    assert result["close"].tolist() == [11.0, 12.0, 12.5]
 
 def test_validator_keeps_valid_positive_ohlcv_rows():
     frame = _valid_frame()
