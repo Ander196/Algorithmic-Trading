@@ -89,6 +89,50 @@ def test_repair_candidates_sends_zero_volume_bars_for_manual_review():
     assert result.loc[0, "proposed_volume"] == 0
 
 
+
+def test_missing_provider_bar_proposes_high_low_swap_only_for_manual_review():
+    candidate = pd.DataFrame(
+        [
+            {
+                "ticker": "CEZ.PR",
+                "price_date": "2013-01-14",
+                "open": 262.2926,
+                "high": 256.2468,
+                "low": 264.2545,
+                "close": 258.2087,
+                "adj_close": 258.2087,
+                "volume": 596094,
+                "reasons": '["high_below_ohlc_max","low_above_ohlc_min"]',
+            }
+        ]
+    )
+
+    result = repair_candidates(
+        candidate,
+        fetcher=lambda *_args: pd.DataFrame(),
+    )
+
+    assert result.loc[0, "repair_status"] == "manual_review_high_low_swap"
+    assert result.loc[0, "proposed_high"] == 264.2545
+    assert result.loc[0, "proposed_low"] == 256.2468
+
+
+def test_existing_zero_volume_row_is_not_auto_updated_even_if_provider_has_bar():
+    candidate = _candidate_rows().iloc[[0]].copy()
+    candidate.loc[:, "volume"] = 0
+    client = _FakeClient()
+
+    result = repair_candidates(
+        candidate,
+        fetcher=lambda *_args: _provider_history(),
+        client=client,
+        apply=True,
+    )
+
+    assert result.loc[0, "repair_status"] == "manual_review_existing_zero_volume"
+    assert client.updates == []
+
+
 def test_apply_requires_a_database_client():
     with pytest.raises(ValueError, match="client is required"):
         repair_candidates(_candidate_rows(), apply=True)
