@@ -36,6 +36,17 @@ def test_validator_refuses_to_fabricate_missing_ohlcv_columns():
     assert result is None
 
 
+
+def test_validator_removes_rows_with_non_positive_adjusted_close():
+    frame = _valid_frame()
+    frame.loc[1, "adj_close"] = -1
+
+    result = validate_ohlcv_frame(frame, "TEST")
+
+    assert result is not None
+    assert result["price_date"].tolist() == ["2026-01-01", "2026-01-03"]
+
+
 def test_validator_keeps_valid_positive_ohlcv_rows():
     frame = _valid_frame()
 
