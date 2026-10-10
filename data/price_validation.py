@@ -103,10 +103,10 @@ def audit_ohlcv_frame(data: pd.DataFrame | None, ticker: str = "") -> OHLCVAudit
     # Check OHLC geometry only when all four price fields are finite and positive.
     geometry_eligible = finite_prices & positive_prices
     if geometry_eligible.any():
-        o = numeric["open"].to_numpy(dtype=float)
-        h = numeric["high"].to_numpy(dtype=float)
-        low = numeric["low"].to_numpy(dtype=float)
-        close = numeric["close"].to_numpy(dtype=float)
+        o = numeric["open"].to_numpy(dtype=float, na_value=np.nan)
+        h = numeric["high"].to_numpy(dtype=float, na_value=np.nan)
+        low = numeric["low"].to_numpy(dtype=float, na_value=np.nan)
+        close = numeric["close"].to_numpy(dtype=float, na_value=np.nan)
         add_reason(
             geometry_eligible & (h < np.maximum.reduce([o, low, close])),
             "high_below_ohlc_max",
