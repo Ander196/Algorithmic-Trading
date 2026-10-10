@@ -89,9 +89,15 @@ class _UpdateQuery:
         self.owner.filters[column] = value
         return self
 
+    def select(self, _columns):
+        return self
+
     def execute(self):
         self.owner.updates.append((self.values, dict(self.owner.filters)))
-        return type("Response", (), {"data": [self.values]})()
+        return type("Response", (), {
+            "data": [{"ticker": self.owner.filters["ticker"],
+                      "price_date": self.owner.filters["price_date"]}]
+        })()
 
 
 class _FakeClient:
