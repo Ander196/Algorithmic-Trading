@@ -79,7 +79,7 @@ def audit_ohlcv_frame(data: pd.DataFrame | None, ticker: str = "") -> OHLCVAudit
     finite_prices = np.isfinite(price_matrix).all(axis=1)
     positive_prices = (price_matrix > 0).all(axis=1)
     add_reason(
-        np.isfinite(price_matrix).all(axis=1) & ~(price_matrix > 0).all(axis=1),
+        np.any(np.isfinite(price_matrix) & (price_matrix <= 0), axis=1),
         "non_positive_ohlc_values",
     )
 
