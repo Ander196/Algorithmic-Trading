@@ -72,13 +72,23 @@ invalid AS (
     SELECT r.ticker, r.price_date, unnest(r.reasons) AS reason
     FROM reasoned AS r
     WHERE CARDINALITY(r.reasons) > 0
+),
+ticker_totals AS (
+    SELECT
+        ticker,
+        COUNT(DISTINCT price_date) AS total_invalid_rows_for_ticker
+    FROM reasoned
+    WHERE CARDINALITY(reasons) > 0
+    GROUP BY ticker
 )
 SELECT
-    ticker,
-    reason,
-    COUNT(*) AS affected_rows,
-    MIN(price_date) AS first_date,
-    MAX(price_date) AS last_date
-FROM invalid
-GROUP BY ticker, reason
-ORDER BY ticker, reason;
+    i.ticker,
+    t.total_invalid_rows_for_ticker,
+    i.reason,
+    COUNT(DISTINCT i.price_date) AS rows_with_reason,
+    MIN(i.price_date) AS first_date,
+    MAX(i.price_date) AS last_date
+FROM invalid AS i
+JOIN ticker_totals AS t USING (ticker)
+GROUP BY i.ticker, t.total_invalid_rows_for_ticker, i.reason
+ORDER BY i.ticker, i.reason;
