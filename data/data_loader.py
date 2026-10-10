@@ -102,7 +102,7 @@ def fetchPriceData(
             if missing:
                 print(
                     f"  {ticker}: rejecting provider response; missing required "
-                    f"columns: {\", \".join(missing)}"
+                    f"columns: {', '.join(missing)}"
                 )
                 return None
 
