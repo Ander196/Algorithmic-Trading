@@ -19,36 +19,41 @@ def get_supabase_client() -> Client:
 def fetch_price_history(
     client: Client,
     ticker: str,
-    limit: int = 1500,
+    limit: int | None = None,
 ) -> pd.DataFrame:
-    """Read the most recent OHLCV history, handling Supabase pagination.
+    """Read OHLCV history using Supabase pagination.
 
-    The query is ordered newest-first so the requested ``limit`` contains the
-    latest observations. The returned DataFrame is then sorted chronologically
-    because downstream rolling features and stateful models expect time order.
+    By default, fetch every available row for ``ticker``. When ``limit`` is
+    provided, the query returns at most the most recent ``limit`` observations.
+    Results are returned in chronological order for rolling features and models.
     """
-    if limit <= 0:
+    if limit is not None and limit <= 0:
         raise ValueError("limit must be greater than zero")
 
     rows: list[dict] = []
     page_size = 1000
     offset = 0
 
-    while len(rows) < limit:
-        end = min(offset + page_size, limit) - 1
+    while limit is None or len(rows) < limit:
+        remaining = page_size if limit is None else min(page_size, limit - len(rows))
+        if remaining <= 0:
+            break
+
         response = (
             client.table("stock_prices")
             .select("price_date,open,high,low,close,volume")
             .eq("ticker", ticker.upper())
             .order("price_date", desc=True)
-            .range(offset, end)
+            .range(offset, offset + remaining - 1)
             .execute()
         )
         batch = response.data or []
-        rows.extend(batch)
-        if len(batch) < page_size:
+        if not batch:
             break
-        offset += page_size
+        rows.extend(batch)
+        offset += len(batch)
+        if len(batch) < remaining:
+            break
 
     if not rows:
         raise RuntimeError(f"No price history found for {ticker}")
@@ -59,7 +64,9 @@ def fetch_price_history(
     for column in ("open", "high", "low", "close", "volume"):
         df[column] = pd.to_numeric(df[column], errors="coerce")
     df = df.dropna(subset=["open", "high", "low", "close", "volume"])
-    return df.tail(limit).reset_index(drop=True)
+    if limit is not None:
+        df = df.tail(limit)
+    return df.reset_index(drop=True)
 
 
 def utc_now() -> datetime:
