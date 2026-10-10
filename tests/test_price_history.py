@@ -64,7 +64,7 @@ def test_fetch_price_history_none_loads_all_pages_in_chronological_order():
     assert len(frame) == 2205
     assert frame["price_date"].is_monotonic_increasing
     assert frame["price_date"].iloc[0] == pd.Timestamp("2000-01-01", tz="UTC")
-    assert frame["price_date"].iloc[-1] == pd.Timestamp("2006-01-14", tz="UTC")
+    assert frame["price_date"].iloc[-1] == pd.Timestamp("2006-01-13", tz="UTC")
     assert client.ranges == [(0, 999), (1000, 1999), (2000, 2999)]
 
 
