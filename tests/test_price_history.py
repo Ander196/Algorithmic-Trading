@@ -105,6 +105,20 @@ def test_fetch_price_history_rejects_excluded_tickers_before_querying():
     assert client.ranges == []
 
 
+
+def test_invalid_price_history_logs_reasons_as_supabase_read(caplog):
+    rows = _rows(5)
+    rows[0]["open"] = 0
+    client = _FakeClient(rows)
+
+    with caplog.at_level("WARNING"):
+        frame = fetch_price_history(client, "AAPL", limit=None)
+
+    assert len(frame) == 4
+    assert "Supabase read | AAPL" in caplog.text
+    assert "non_positive_ohlc_values" in caplog.text
+    assert "before upload" not in caplog.text
+
 def test_fetch_price_history_raises_when_ticker_has_no_history():
     with pytest.raises(RuntimeError, match="No price history found for AAPL"):
         fetch_price_history(_FakeClient([]), "AAPL", limit=None)
