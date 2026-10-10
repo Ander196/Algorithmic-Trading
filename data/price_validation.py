@@ -35,7 +35,7 @@ def validate_ohlcv_frame(
     for column in REQUIRED_OHLCV_COLUMNS:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
-    prices = frame.loc[:, PRICE_COLUMNS]
+    prices = frame.loc[:, list(PRICE_COLUMNS)]
     valid = prices.notna().all(axis=1)
     valid &= np.isfinite(prices).all(axis=1)
     valid &= (prices > 0).all(axis=1)
