@@ -36,7 +36,6 @@ def test_validator_refuses_to_fabricate_missing_ohlcv_columns():
     assert result is None
 
 
-
 def test_validator_removes_rows_with_non_positive_adjusted_close():
     frame = _valid_frame()
     frame.loc[1, "adj_close"] = -1
