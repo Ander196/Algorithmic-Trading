@@ -4,9 +4,9 @@ Historical OHLCV loader for all active tickers.
 The loader:
 - reads active tickers from the Supabase stocks table;
 - preserves existing history in stock_prices;
-- backfills older data from yfinance when available;
+- backfills from 2000-01-01 where history is missing;
 - fetches recent data from the latest stored date through today;
-- uses maximum available yfinance history by default.
+- excludes tickers known to have invalid historical prices.
 
 Usage:
     python -m data.data_loader_historical
@@ -24,7 +24,14 @@ import supabase
 import yfinance as yf
 from dotenv import load_dotenv
 
+from data.excluded_tickers import is_excluded_ticker, normalize_ticker
+from data.price_validation import validate_ohlcv_frame
+
 load_dotenv(".env.secrets")
+
+# Retain enough history for Alpha while preventing future max-history backfills
+# from reintroducing observations that were intentionally removed.
+HISTORICAL_START_DATE = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 
 def getSupabaseClient() -> supabase.Client:
@@ -50,9 +57,9 @@ def getActiveTickers(client: supabase.Client) -> list[str]:
         .execute()
     )
     return [
-        str(row["ticker"]).upper()
-        for row in response.data
-        if row.get("ticker")
+        normalize_ticker(row["ticker"])
+        for row in (response.data or [])
+        if row.get("ticker") and not is_excluded_ticker(row["ticker"])
     ]
 
 
@@ -106,16 +113,16 @@ def fetchPriceData(
 ) -> pd.DataFrame | None:
     """Fetch OHLCV data from yfinance.
 
-    When startDate is None, yfinance requests maximum available history.
+    History is bounded to HISTORICAL_START_DATE or the later requested start date.
     """
     for attempt in range(retries):
         try:
             stock = yf.Ticker(ticker)
 
-            if startDate is None:
-                df = stock.history(period="max", end=endDate)
-            else:
-                df = stock.history(start=startDate, end=endDate)
+            effectiveStart = startDate or HISTORICAL_START_DATE
+            if effectiveStart < HISTORICAL_START_DATE:
+                effectiveStart = HISTORICAL_START_DATE
+            df = stock.history(start=effectiveStart, end=endDate)
 
             if df.empty:
                 return None
@@ -135,9 +142,13 @@ def fetchPriceData(
             )
 
             keepCols = ["open", "high", "low", "close", "volume"]
-            for col in keepCols:
-                if col not in df.columns:
-                    df[col] = 0
+            missing = sorted(set(keepCols) - set(df.columns))
+            if missing:
+                print(
+                    f"  {ticker}: rejecting provider response; missing required "
+                    f"columns: {', '.join(missing)}"
+                )
+                return None
 
             df = df[keepCols].copy()
             df["ticker"] = ticker.upper()
@@ -145,8 +156,13 @@ def fetchPriceData(
             df = df.reset_index(drop=True)
 
             try:
+                adjusted_start = max(
+                    startDate or HISTORICAL_START_DATE,
+                    HISTORICAL_START_DATE,
+                )
                 adjusted = stock.history(
-                    **({"period": "max"} if startDate is None else {"start": startDate, "end": endDate}),
+                    start=adjusted_start,
+                    end=endDate,
                     auto_adjust=False,
                 )
                 if isinstance(adjusted.columns, pd.MultiIndex):
@@ -161,6 +177,9 @@ def fetchPriceData(
             except Exception:
                 df["adj_close"] = df["close"]
 
+            df = validate_ohlcv_frame(df, ticker)
+            if df is None or df.empty:
+                return None
             return df
 
         except Exception:
@@ -178,8 +197,15 @@ def uploadToSupabase(
     batchSize: int = 500,
 ) -> int:
     """Upload price data to Supabase, skipping duplicate rows."""
-    if df.empty:
+    ticker = normalize_ticker(ticker)
+    if is_excluded_ticker(ticker):
+        print(f"  {ticker}: refusing to upload excluded price history")
         return 0
+
+    df = validate_ohlcv_frame(df, ticker)
+    if df is None or df.empty:
+        return 0
+
 
     records = []
     now = datetime.now(timezone.utc).isoformat()
@@ -231,10 +257,10 @@ def processTicker(
 ) -> dict[str, Any]:
     """Backfill and update one ticker.
 
-    years_of_history=None is the default and means maximum available
-    yfinance history. A positive value keeps the bounded historical mode.
+    years_of_history=None loads all available history from 2000-01-01 onward.
+    A positive value requests a shorter range but never predates that cutoff.
     """
-    ticker = ticker.upper()
+    ticker = normalize_ticker(ticker)
     result = {
         "ticker": ticker,
         "fetched": 0,
@@ -243,13 +269,21 @@ def processTicker(
         "error": None,
     }
 
+    if is_excluded_ticker(ticker):
+        print(f"  {ticker}: excluded due to known invalid price history")
+        result["skipped"] = 1
+        return result
+
     try:
         today = datetime.now(timezone.utc)
         staleDate = today - timedelta(days=max_days_stale)
         requestedStart = (
-            None
+            HISTORICAL_START_DATE
             if years_of_history is None
-            else today - timedelta(days=365 * years_of_history)
+            else max(
+                HISTORICAL_START_DATE,
+                today - timedelta(days=365 * years_of_history),
+            )
         )
 
         earliestDate = getEarliestPriceDate(client, ticker)
@@ -257,11 +291,7 @@ def processTicker(
 
         if latestDate is None:
             startDate = requestedStart
-            label = (
-                "maximum available history"
-                if requestedStart is None
-                else f"since {requestedStart.date()}"
-            )
+            label = f"since {startDate.date()}"
             print(f"  {ticker}: No existing data, fetching {label} to {today.date()}")
 
         else:
@@ -270,9 +300,7 @@ def processTicker(
             # With maximum-history mode, backfill the missing prefix without
             # deleting existing rows. With bounded mode, only backfill to the
             # requested start when the DB starts too late.
-            if earliestDate is not None and (
-                requestedStart is None or earliestDate > requestedStart
-            ):
+            if earliestDate is not None and earliestDate > requestedStart:
                 print(f"  {ticker}: Backfilling history before {earliestDate.date()}")
                 backfill = fetchPriceData(
                     ticker,
@@ -330,13 +358,13 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Load maximum available historical stock data"
+        description="Load stock history from 2000-01-01 onwards"
     )
     parser.add_argument(
         "--years",
         type=int,
         default=None,
-        help="Optional bounded history in years; default is maximum available yfinance history.",
+        help="Optional shorter history window in years; default starts at 2000-01-01.",
     )
     parser.add_argument(
         "--force",

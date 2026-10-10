@@ -21,6 +21,8 @@ import supabase
 import yfinance as yf
 from dotenv import load_dotenv
 
+from data.excluded_tickers import EXCLUDED_TICKERS, is_excluded_ticker, normalize_ticker
+
 load_dotenv(".env.secrets")
 
 
@@ -114,7 +116,11 @@ ALL_TICKERS = list(set(US_TICKERS + EU_TICKERS))
 
 
 def fetchTickerInfo(ticker: str, retries: int = 2) -> dict | None:
-    """Fetch stock info from yfinance with retry logic."""
+    """Fetch stock info unless the ticker is explicitly excluded."""
+    ticker = normalize_ticker(ticker)
+    if is_excluded_ticker(ticker):
+        return None
+
     for attempt in range(retries):
         try:
             info = yf.Ticker(ticker).info
@@ -137,7 +143,8 @@ def fetchTickerInfo(ticker: str, retries: int = 2) -> dict | None:
 
 
 def fetchAllTickers(tickers: list[str], batchSize: int = 50, delay: float = 0.5) -> pd.DataFrame:
-    """Fetch info for all tickers with batching and rate limiting."""
+    """Fetch non-excluded ticker info with batching and rate limiting."""
+    tickers = [normalize_ticker(t) for t in tickers if t and not is_excluded_ticker(t)]
     results = []
     total = len(tickers)
 
@@ -180,11 +187,26 @@ def uploadToSupabase(df: pd.DataFrame, client: supabase.Client) -> tuple[int, in
     - Marks missing tickers as is_active=False
     Returns (new_count, deactivated_count)
     """
+    if not df.empty:
+        df = df.loc[~df["ticker"].map(is_excluded_ticker)].copy()
+
     existingTickers = getExistingTickers(client)
-    now = getNowTimestamptz()
     newCount = 0
     deactivatedCount = 0
 
+    # Do not deactivate the entire universe if a catalog fetch returns no
+    # eligible symbols. Still ensure the permanent blocklist stays inactive.
+    if df.empty:
+        excluded_existing = {
+            ticker for ticker in existingTickers if is_excluded_ticker(ticker)
+        }
+        for ticker in excluded_existing:
+            client.table("stocks").update({"is_active": False}).eq(
+                "ticker", ticker
+            ).execute()
+        return 0, len(excluded_existing)
+
+    now = getNowTimestamptz()
     print(f"\nExisting tickers in DB: {len(existingTickers)}")
     print(f"New tickers to upload: {len(df)}")
 
@@ -230,6 +252,12 @@ def main() -> None:
 
     # Initialize Supabase client
     client = supabase.create_client(supabaseUrl, supabaseKey)
+
+    # Enforce the exclusion in the database too; do not let a catalog refresh
+    # reactivate symbols whose price history was intentionally removed.
+    client.table("stocks").update({"is_active": False}).in_(
+        "ticker", sorted(EXCLUDED_TICKERS)
+    ).execute()
 
     # Fetch ticker info
     df = fetchAllTickers(ALL_TICKERS)

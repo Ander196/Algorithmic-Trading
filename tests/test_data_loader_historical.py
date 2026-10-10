@@ -6,7 +6,7 @@ import pandas as pd
 from data import data_loader_historical as loader
 
 
-def test_process_ticker_defaults_to_maximum_available_history(monkeypatch):
+def test_process_ticker_defaults_to_history_since_2000(monkeypatch):
     calls = []
 
     class FrozenDateTime(datetime):
@@ -47,11 +47,11 @@ def test_process_ticker_defaults_to_maximum_available_history(monkeypatch):
     assert result["skipped"] == 1
     assert len(calls) == 1
     assert calls[0][0] == "AAPL"
-    assert calls[0][1] is None
+    assert calls[0][1] == loader.HISTORICAL_START_DATE
     assert calls[0][2] == datetime(2021, 1, 1, tzinfo=timezone.utc)
 
 
-def test_fetch_price_data_uses_period_max_when_start_is_none(monkeypatch):
+def test_fetch_price_data_starts_at_2000_when_start_is_none(monkeypatch):
     calls = []
 
     class FakeTicker:
@@ -80,6 +80,6 @@ def test_fetch_price_data_uses_period_max_when_start_is_none(monkeypatch):
 
     assert result is not None
     assert not result.empty
-    assert calls[0]["period"] == "max"
-    assert "start" not in calls[0]
-    assert "end" in calls[0]
+    assert calls[0]["start"] == loader.HISTORICAL_START_DATE
+    assert calls[0]["end"] == datetime(2026, 9, 28, tzinfo=timezone.utc)
+    assert "period" not in calls[0]

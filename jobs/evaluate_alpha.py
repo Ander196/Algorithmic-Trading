@@ -27,6 +27,8 @@ from core.walk_forward import WalkForwardConfig, WalkForwardProtocol
 from jobs.common import fetch_price_history, get_supabase_client
 from dotenv import load_dotenv
 
+from data.excluded_tickers import is_excluded_ticker, normalize_ticker
+
 load_dotenv(".env.secrets")
 
 
@@ -65,9 +67,9 @@ def get_alpha_universe(
         .execute()
     )
     tickers = {
-        str(row["ticker"]).upper()
+        normalize_ticker(row["ticker"])
         for row in (response.data or [])
-        if row.get("ticker")
+        if row.get("ticker") and not is_excluded_ticker(row["ticker"])
     }
     tickers.discard(market_ticker.upper())
     return sorted(tickers)

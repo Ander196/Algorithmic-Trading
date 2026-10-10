@@ -24,6 +24,9 @@ import supabase
 import yfinance as yf
 from dotenv import load_dotenv
 
+from data.excluded_tickers import is_excluded_ticker, normalize_ticker
+from data.price_validation import validate_ohlcv_frame
+
 load_dotenv(".env.secrets")
 
 
@@ -46,7 +49,11 @@ def getActiveTickers(client: supabase.Client) -> list[str]:
         .eq("is_active", True)
         .execute()
     )
-    return [row["ticker"] for row in response.data]
+    return [
+        normalize_ticker(row["ticker"])
+        for row in (response.data or [])
+        if row.get("ticker") and not is_excluded_ticker(row["ticker"])
+    ]
 
 
 def getLatestPriceDate(client: supabase.Client, ticker: str) -> datetime | None:
@@ -91,9 +98,13 @@ def fetchPriceData(
             })
 
             keepCols = ["open", "high", "low", "close", "volume"]
-            for col in keepCols:
-                if col not in df.columns:
-                    df[col] = 0
+            missing = sorted(set(keepCols) - set(df.columns))
+            if missing:
+                print(
+                    f"  {ticker}: rejecting provider response; missing required "
+                    f"columns: {', '.join(missing)}"
+                )
+                return None
 
             df = df[keepCols].copy()
             df["ticker"] = ticker
@@ -106,7 +117,7 @@ def fetchPriceData(
             except Exception:
                 df["adj_close"] = df["close"]
 
-            return df
+            return validate_ohlcv_frame(df, ticker)
 
         except Exception:
             if attempt < retries - 1:
@@ -123,8 +134,15 @@ def uploadToSupabase(
     batchSize: int = 500,
 ) -> int:
     """Upload price data to Supabase."""
-    if df.empty:
+    ticker = normalize_ticker(ticker)
+    if is_excluded_ticker(ticker):
+        print(f"  {ticker}: refusing to upload excluded price history")
         return 0
+
+    df = validate_ohlcv_frame(df, ticker)
+    if df is None or df.empty:
+        return 0
+
 
     records = []
     now = datetime.now(timezone.utc).isoformat()
@@ -161,7 +179,8 @@ def uploadToSupabase(
 
 
 def processTicker(client: supabase.Client, ticker: str) -> dict[str, Any]:
-    """Process a single ticker: fetch incremental data and upload to Supabase."""
+    """Process one ticker unless it is on the permanent invalid-data blocklist."""
+    ticker = normalize_ticker(ticker)
     result = {
         "ticker": ticker,
         "fetched": 0,
@@ -169,6 +188,11 @@ def processTicker(client: supabase.Client, ticker: str) -> dict[str, Any]:
         "skipped": 0,
         "error": None,
     }
+
+    if is_excluded_ticker(ticker):
+        print(f"  {ticker}: excluded due to known invalid price history")
+        result["skipped"] = 1
+        return result
 
     try:
         latestDate = getLatestPriceDate(client, ticker)
