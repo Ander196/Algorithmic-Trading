@@ -67,16 +67,23 @@ def test_outlier_sensitivity_uses_same_dates_and_caps_target_values() -> None:
     assert sensitivity.loc[1, "target_treatment"] == "winsorized_cross_section_1%_99%"
 
 
-def test_extreme_return_rows_include_both_tails() -> None:
-    rows = extreme_return_rows(_oos_predictions(), n_per_side=2)
+def test_extreme_return_rows_include_only_true_positive_and_negative_tails() -> None:
+    predictions = _oos_predictions()
+    date = pd.Timestamp("2024-01-01")
+    predictions.loc[(date, "T000"), "target_excess_return"] = -2.0
+    predictions.loc[(date, "T001"), "target_excess_return"] = -1.0
+    predictions.loc[(date, "T028"), "target_excess_return"] = 5.0
+    predictions.loc[(date, "T029"), "target_excess_return"] = 6.0
+
+    rows = extreme_return_rows(predictions, n_per_side=2)
 
     assert len(rows) == 4
     assert set(rows["extreme_side"]) == {
         "largest_positive_excess",
         "largest_negative_excess",
     }
-    assert rows["target_excess_return"].max() > 0
-    assert rows["extreme_side"].eq("largest_negative_excess").any()
+    assert (rows.loc[rows["extreme_side"] == "largest_positive_excess", "target_excess_return"] > 0).all()
+    assert (rows.loc[rows["extreme_side"] == "largest_negative_excess", "target_excess_return"] < 0).all()
 
 
 @pytest.mark.parametrize("kwargs,match", [
