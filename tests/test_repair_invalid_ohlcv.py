@@ -325,3 +325,16 @@ def test_apply_conditional_update_refuses_change_between_select_and_update():
     assert result.loc[0, "repair_status"] == "update_not_confirmed"
     assert client.updates == []
     assert client.rows[0]["close"] == 99.6
+
+
+def test_intraday_preview_rejects_large_gaps_even_when_bar_count_is_sufficient():
+    history = _intraday_history().drop(_intraday_history().index[30:33])
+
+    result = repair_candidates(
+        _audit_rows(),
+        mode="intraday-high-low",
+        fetcher=lambda *_args: history,
+    )
+
+    assert result.loc[0, "repair_status"] == "intraday_data_rejected"
+    assert "intraday_gaps_exceed_15_minutes" in result.loc[0, "repair_error"]
