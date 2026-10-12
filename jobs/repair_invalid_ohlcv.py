@@ -505,7 +505,7 @@ def apply_approved_report(approved_report: pd.DataFrame, client) -> pd.DataFrame
             "approved report missing required columns: " + ", ".join(sorted(missing))
         )
 
-    result = approved_report.copy()
+    result = approved_report.copy().reset_index(drop=True)
     eligible = result.apply(lambda row: _approval_is_true(row["approved"]), axis=1)
     if not eligible.any():
         raise ValueError(
@@ -584,11 +584,22 @@ def apply_approved_report(approved_report: pd.DataFrame, client) -> pd.DataFrame
             continue
 
         try:
-            update_response = (
+            # Use the captured snapshot as conditional update filters too. This
+            # closes the race between the preceding SELECT and the UPDATE.
+            update_query = (
                 client.table("stock_prices")
                 .update(proposed_values)
                 .eq("ticker", ticker)
                 .eq("price_date", date)
+            )
+            for column in SNAPSHOT_COLUMNS:
+                snapshot_value = current.get(column)
+                if snapshot_value is None:
+                    update_query = update_query.is_(column, "null")
+                else:
+                    update_query = update_query.eq(column, snapshot_value)
+            update_response = (
+                update_query
                 .select("ticker,price_date")
                 .execute()
             )
