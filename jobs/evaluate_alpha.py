@@ -221,17 +221,17 @@ def _print_diagnostics(
         random_repeats=random_repeats,
         random_seed=random_seed,
     )
-    print("\\n=== Alpha OOS Baseline Comparison ===")
-    print(diagnostics.strategy_comparison.to_string(
+    print("\n=== Alpha OOS Baseline Comparison ===")
+    print(diagnostics.ranking_comparison.to_string(
         index=False, float_format=lambda value: f"{value:.6f}"
     ))
-    print("\\n=== Alpha OOS Outlier Sensitivity ===")
+    print("\n=== Alpha OOS Outlier Sensitivity ===")
     print(diagnostics.outlier_sensitivity.to_string(
         index=False, float_format=lambda value: f"{value:.6f}"
     ))
 
     extremes = extreme_return_rows(report.oos_predictions, n_per_side=10)
-    print("\\n=== Largest OOS Excess-Return Observations ===")
+    print("\n=== Largest OOS Excess-Return Observations ===")
     print(extremes.to_string(
         index=False, float_format=lambda value: f"{value:.6f}"
     ))
@@ -243,8 +243,8 @@ def _print_diagnostics(
     if diagnostics_dir is not None:
         diagnostics_dir.mkdir(parents=True, exist_ok=True)
         report.oos_predictions.to_csv(diagnostics_dir / "alpha_oos_predictions.csv")
-        diagnostics.strategy_comparison.to_csv(
-            diagnostics_dir / "alpha_strategy_comparison.csv", index=False
+        diagnostics.ranking_comparison.to_csv(
+            diagnostics_dir / "alpha_ranking_comparison.csv", index=False
         )
         diagnostics.outlier_sensitivity.to_csv(
             diagnostics_dir / "alpha_outlier_sensitivity.csv", index=False
