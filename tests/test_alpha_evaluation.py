@@ -86,3 +86,4 @@ def test_predictions_require_expected_and_realized_returns() -> None:
     evaluator = AlphaEvaluator()
     with pytest.raises(ValueError, match="missing"):
         evaluator.evaluate_fold(predictions, _fold(len(predictions)))
+
