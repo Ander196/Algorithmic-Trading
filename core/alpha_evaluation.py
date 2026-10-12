@@ -175,9 +175,16 @@ class AlphaEvaluator:
             fold_metric = self.evaluate_fold(predictions, fold)
             fold_metrics.append(fold_metric)
 
+            # Preserve point-in-time features needed to compare Alpha against
+            # momentum baselines on exactly the same out-of-sample rows.
             prediction_frames.append(
                 predictions[
-                    ["target_excess_return", "expected_excess_return"]
+                    [
+                        "target_excess_return",
+                        "expected_excess_return",
+                        "return_20",
+                        "return_60",
+                    ]
                 ].copy()
             )
 
