@@ -16,7 +16,7 @@ from scipy.stats import spearmanr
 class AlphaDiagnosticReport:
     """Baseline comparison and outlier-sensitivity tables."""
 
-    strategy_comparison: pd.DataFrame
+    ranking_comparison: pd.DataFrame
     outlier_sensitivity: pd.DataFrame
 
 
@@ -232,7 +232,7 @@ def evaluate_alpha_diagnostics(
     ]
 
     return AlphaDiagnosticReport(
-        strategy_comparison=pd.DataFrame(comparison_rows),
+        ranking_comparison=pd.DataFrame(comparison_rows),
         outlier_sensitivity=pd.DataFrame(sensitivity_rows),
     )
 
