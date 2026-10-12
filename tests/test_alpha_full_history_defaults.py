@@ -41,6 +41,8 @@ def test_alpha_cli_defaults_to_unlimited_history_but_keeps_explicit_cap(
     monkeypatch.setattr(sys, "argv", ["evaluate_alpha.py", *extra_args])
     monkeypatch.setattr(evaluate_alpha_job, "get_supabase_client", lambda: object())
     monkeypatch.setattr(evaluate_alpha_job, "evaluate_alpha", fake_evaluate_alpha)
+    # This test covers CLI history-limit parsing only; diagnostics have dedicated tests.
+    monkeypatch.setattr(evaluate_alpha_job, "_print_diagnostics", lambda *args, **kwargs: None)
 
     evaluate_alpha_job.main()
 
