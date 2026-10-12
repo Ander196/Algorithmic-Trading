@@ -32,7 +32,7 @@ def test_diagnostics_compare_model_momentum_and_random_baseline() -> None:
         random_seed=17,
     )
 
-    comparison = report.strategy_comparison.set_index("signal")
+    comparison = report.ranking_comparison.set_index("signal")
     assert comparison.loc["ridge_alpha", "mean_ic"] == pytest.approx(1.0)
     assert comparison.loc["momentum_20", "mean_ic"] == pytest.approx(1.0)
     assert comparison.loc["momentum_60", "mean_ic"] == pytest.approx(1.0)
@@ -43,10 +43,10 @@ def test_diagnostics_compare_model_momentum_and_random_baseline() -> None:
 def test_random_baseline_is_reproducible_for_same_seed() -> None:
     first = evaluate_alpha_diagnostics(
         _oos_predictions(), random_repeats=3, random_seed=123
-    ).strategy_comparison
+    ).ranking_comparison
     second = evaluate_alpha_diagnostics(
         _oos_predictions(), random_repeats=3, random_seed=123
-    ).strategy_comparison
+    ).ranking_comparison
 
     pd.testing.assert_frame_equal(first, second)
 
