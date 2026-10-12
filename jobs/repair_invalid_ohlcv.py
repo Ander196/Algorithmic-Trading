@@ -33,6 +33,7 @@ INPUT_REQUIRED_COLUMNS = {"ticker", "price_date", *SNAPSHOT_COLUMNS}
 MODES = {"provider-daily", "intraday-high-low"}
 INTRADAY_MIN_BARS = 70
 INTRADAY_MIN_SPAN = timedelta(hours=6)
+INTRADAY_MAX_GAP = timedelta(minutes=15)
 
 REPORT_COLUMNS = [
     "ticker",
@@ -263,6 +264,17 @@ def _intraday_validation_reasons(
         return ["insufficient_intraday_session_span"]
     if frame.index.tz is None:
         return ["intraday_timezone_missing"]
+
+    # This repair mode targets a complete regular US-equity session. Do not
+    # infer daily extrema from bars that start late or end before the close.
+    first_minute = frame.index[0].hour * 60 + frame.index[0].minute
+    last_minute = frame.index[-1].hour * 60 + frame.index[-1].minute
+    if first_minute > 9 * 60 + 35:
+        return ["intraday_session_start_missing"]
+    if last_minute < 15 * 60 + 50:
+        return ["intraday_session_end_missing"]
+    if (frame.index.to_series().diff().dropna() > INTRADAY_MAX_GAP).any():
+        return ["intraday_gaps_exceed_15_minutes"]
 
     for column in (*PRICE_COLUMNS, VOLUME_COLUMN):
         values = frame[column].to_numpy(dtype=float, na_value=np.nan)
