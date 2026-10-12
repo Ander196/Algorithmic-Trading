@@ -250,9 +250,13 @@ def extreme_return_rows(
     rows = rows.replace([np.inf, -np.inf], np.nan).dropna(
         subset=["target_excess_return"]
     )
-    positive = rows.nlargest(n_per_side, "target_excess_return").copy()
+    positive = rows.loc[rows["target_excess_return"] > 0.0].nlargest(
+        n_per_side, "target_excess_return"
+    ).copy()
     positive["extreme_side"] = "largest_positive_excess"
-    negative = rows.nsmallest(n_per_side, "target_excess_return").copy()
+    negative = rows.loc[rows["target_excess_return"] < 0.0].nsmallest(
+        n_per_side, "target_excess_return"
+    ).copy()
     negative["extreme_side"] = "largest_negative_excess"
     result = pd.concat([positive, negative], ignore_index=True)
     return result.sort_values(
