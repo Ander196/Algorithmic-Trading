@@ -70,7 +70,7 @@ def fetch_price_history(
     df = df.sort_values("price_date").drop_duplicates("price_date", keep="last")
     for column in ("open", "high", "low", "close", "volume"):
         df[column] = pd.to_numeric(df[column], errors="coerce")
-    df = validate_ohlcv_frame(df, ticker)
+    df = validate_ohlcv_frame(df, ticker, context="Supabase read")
     if df is None or df.empty:
         raise RuntimeError(f"No valid OHLCV history found for {ticker}")
     if limit is not None:
