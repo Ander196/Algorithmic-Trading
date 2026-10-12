@@ -1,7 +1,6 @@
 import pandas as pd
 import pytest
 
-from core.alpha_diagnostics import evaluate_alpha_diagnostics
 from core.alpha_evaluation import AlphaEvaluationReport
 from jobs.evaluate_alpha import _print_diagnostics, _to_ohlcv_frame, get_alpha_universe
 
