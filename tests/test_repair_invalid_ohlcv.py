@@ -295,3 +295,33 @@ def test_apply_refuses_invalid_approved_values():
 
     assert result.loc[0, "repair_status"] == "approved_values_invalid"
     assert client.updates == []
+
+
+class _RacingQuery(_FakeQuery):
+    def execute(self):
+        response = super().execute()
+        if self.operation == "select" and not self.client.raced:
+            self.client.raced = True
+            # Simulate another writer changing the database after the snapshot read.
+            self.client.rows[0]["close"] = 99.6
+        return response
+
+
+class _RacingClient(_FakeClient):
+    def __init__(self, rows=None):
+        super().__init__(rows)
+        self.raced = False
+
+    def table(self, table_name):
+        assert table_name == "stock_prices"
+        return _RacingQuery(self)
+
+
+def test_apply_conditional_update_refuses_change_between_select_and_update():
+    client = _RacingClient([_candidate_row()])
+
+    result = apply_approved_report(_approved_intraday_report(True), client)
+
+    assert result.loc[0, "repair_status"] == "update_not_confirmed"
+    assert client.updates == []
+    assert client.rows[0]["close"] == 99.6
