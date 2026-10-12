@@ -637,6 +637,14 @@ def main() -> None:
         help="provider-daily replaces a complete bar; intraday-high-low preserves every field except high/low",
     )
     parser.add_argument(
+        "--date",
+        help="Limit the audit input to one session date (YYYY-MM-DD). Required for intraday-high-low.",
+    )
+    parser.add_argument(
+        "--tickers",
+        help="Optional comma-separated ticker allowlist, e.g. BRO,CE,COF.",
+    )
+    parser.add_argument(
         "--report-csv",
         default="ohlcv_repair_preview.csv",
         help="Path for preview or apply-result CSV",
@@ -675,6 +683,29 @@ def main() -> None:
         parser.error(f"input CSV does not exist: {input_path}")
 
     candidates = pd.read_csv(input_path)
+    if args.mode == "intraday-high-low" and not args.date:
+        parser.error("--mode intraday-high-low requires --date to avoid scanning historical audit rows")
+    if args.date:
+        requested_date = pd.to_datetime(args.date, errors="coerce")
+        if pd.isna(requested_date):
+            parser.error("--date must be a valid date in YYYY-MM-DD format")
+        requested_date = requested_date.strftime("%Y-%m-%d")
+        candidates = candidates.loc[
+            pd.to_datetime(candidates["price_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            == requested_date
+        ]
+    if args.tickers:
+        ticker_allowlist = {
+            ticker.strip().upper() for ticker in args.tickers.split(",") if ticker.strip()
+        }
+        if not ticker_allowlist:
+            parser.error("--tickers must contain at least one ticker")
+        candidates = candidates.loc[
+            candidates["ticker"].astype(str).str.strip().str.upper().isin(ticker_allowlist)
+        ]
+    if candidates.empty:
+        parser.error("no audit rows matched --date/--tickers filters")
+
     result = repair_candidates(candidates, mode=args.mode)
     result.to_csv(report_path, index=False)
     print(f"Audit rows processed: {len(result)}")
