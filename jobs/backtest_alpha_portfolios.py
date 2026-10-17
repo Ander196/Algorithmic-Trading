@@ -63,7 +63,7 @@ def main() -> None:
     parser.add_argument("--transaction-cost-bps", type=float, default=5.0)
     parser.add_argument("--min-cross-section", type=int, default=20)
     parser.add_argument("--momentum-lookback", type=int, default=60)
-    parser.add_argument("--max-stale-sessions", type=int, default=3)
+    parser.add_argument("--max-stale-sessions", type=int, default=0)
     args = parser.parse_args()
 
     try:
