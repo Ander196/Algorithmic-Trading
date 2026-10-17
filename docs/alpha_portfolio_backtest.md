@@ -139,3 +139,13 @@ backfilling with future exchange rates. Prolonged internal FX coverage gaps
 still fail validation. It reads Supabase but does not modify database records.
 The export converts prices to USD, but does not correct any non-USD mismatch in
 Alpha's training labels; that remains a research limitation.
+
+
+### FX data gaps
+
+The exporter requests FX history through only the sessions used by the OOS
+backtest. A leading gap or an internal gap longer than the bounded stale-price
+allowance is preserved as a missing observation, not filled with a future quote.
+The exporter prints a warning listing tickers with incomplete coverage. The
+portfolio backtest must be stopped if a selected holding would have a missing
+next-session return; do not relax that safety check merely to complete the run.
