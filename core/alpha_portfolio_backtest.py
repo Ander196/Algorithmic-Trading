@@ -99,6 +99,8 @@ def _prepare_prices(
         prices[column] = pd.to_numeric(prices[column], errors="coerce")
     values = prices.to_numpy(dtype=float)
     prices = prices.where(np.isfinite(values) & (values > 0))
+    if prices[benchmark_ticker].isna().any():
+        raise ValueError("benchmark price history contains missing or non-positive values")
     # Tolerating stale observations is opt-in because it can distort daily risk
     # metrics and move a multi-session price move onto the wrong session.
     if config.max_stale_sessions:
@@ -212,15 +214,27 @@ def run_alpha_portfolio_backtest(
     prices = _prepare_prices(close_prices, benchmark_ticker, config)
     if predictions.empty:
         raise ValueError("oos_predictions must not be empty")
-    predictions = predictions.loc[predictions["ticker"].isin(prices.columns)].copy()
+    missing_tickers = sorted(set(predictions["ticker"]) - set(prices.columns))
+    if missing_tickers:
+        sample = ", ".join(missing_tickers[:10])
+        raise ValueError(f"price panel is missing predicted tickers: {sample}")
+    prediction_dates = set(predictions["date"])
+    missing_dates = sorted(prediction_dates - set(prices.index))
+    if missing_dates:
+        sample = ", ".join(pd.Timestamp(date).date().isoformat() for date in missing_dates[:5])
+        raise ValueError(f"price panel is missing OOS signal dates: {sample}")
     if predictions.empty:
-        raise ValueError("no prediction tickers have close-price histories")
+        raise ValueError("oos_predictions must not be empty")
 
-    signal_dates = sorted(set(predictions["date"]).intersection(prices.index))
+    signal_dates = sorted(prediction_dates)
     if len(signal_dates) < 2:
-        raise ValueError("at least two OOS signal dates must overlap close_prices")
+        raise ValueError("at least two OOS signal dates are required")
     first_signal_pos = int(prices.index.get_loc(signal_dates[0]))
     last_signal_pos = int(prices.index.get_loc(signal_dates[-1]))
+    if first_signal_pos < config.momentum_lookback:
+        raise ValueError(
+            "close_prices must include at least momentum_lookback sessions before the first OOS signal"
+        )
 
     # Signals are not tradable at the same close used to calculate them. Need
     # an execution close and one later close for the last OOS signal as well.
@@ -257,7 +271,7 @@ def run_alpha_portfolio_backtest(
         signal_date = pd.Timestamp(prices.index[execution_pos - 1])
         day_returns = forward_returns.loc[execution_date]
         if pd.isna(day_returns.get(benchmark_ticker)):
-            continue
+            raise ValueError(f"benchmark has a missing next-session return after {execution_date.date()}")
         rows = prediction_groups.get(signal_date, pd.DataFrame())
         is_rebalance = session_number % config.rebalance_every == 0
         turnover_by_strategy: dict[str, float] = {}
