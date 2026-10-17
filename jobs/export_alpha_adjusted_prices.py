@@ -85,7 +85,12 @@ def _fx_usd_per_unit(currency: str, start: str, end: str) -> pd.Series:
     )
     if history.empty or "Close" not in history:
         raise ValueError(f"No FX history returned for {currency} ({symbol})")
-    index = pd.DatetimeIndex(pd.to_datetime(history.index, utc=True).tz_convert(None)).normalize()
+    # Preserve the provider's daily session label instead of converting the
+    # timestamp to UTC first (which can move non-UTC bars to the prior date).
+    index = pd.DatetimeIndex(history.index)
+    if index.tz is not None:
+        index = index.tz_localize(None)
+    index = index.normalize()
     values = pd.to_numeric(history["Close"], errors="coerce").to_numpy(dtype=float)
     series = pd.Series(values, index=index).replace([np.inf, -np.inf], np.nan).dropna()
     series = series.loc[series > 0].sort_index()
@@ -93,6 +98,39 @@ def _fx_usd_per_unit(currency: str, start: str, end: str) -> pd.Series:
     if inverse:
         series = 1.0 / series
     return series
+
+
+def _align_fx_to_calendar(
+    fx_series: pd.Series,
+    calendar: pd.DatetimeIndex,
+    *,
+    currency: str,
+    max_stale_sessions: int = 5,
+) -> pd.Series:
+    """Align FX quotes to benchmark sessions without backfilling future rates.
+
+    Leading missing sessions are left NaN because the provider has no earlier
+    observation to support a point-in-time conversion. Once the first FX quote
+    exists, gaps longer than the permitted forward-fill window are rejected.
+    """
+    if max_stale_sessions < 0:
+        raise ValueError("max_stale_sessions must be >= 0")
+    index = pd.DatetimeIndex(fx_series.index)
+    if index.tz is not None:
+        index = index.tz_localize(None)
+    normalized = fx_series.copy()
+    normalized.index = index.normalize()
+    normalized = normalized.sort_index()
+    aligned = normalized.reindex(calendar).ffill(limit=max_stale_sessions)
+    valid_positions = np.flatnonzero(aligned.notna().to_numpy())
+    if len(valid_positions) == 0:
+        raise ValueError(f"No FX coverage for {currency} in the requested date range")
+    first_valid_pos = int(valid_positions[0])
+    if aligned.iloc[first_valid_pos:].isna().any():
+        raise ValueError(
+            f"Missing FX coverage for {currency} after the first available quote"
+        )
+    return aligned
 
 
 def export_prices(predictions_csv: Path, output_csv: Path, *, benchmark: str = "SPY",
@@ -138,9 +176,15 @@ def export_prices(predictions_csv: Path, output_csv: Path, *, benchmark: str = "
         values = native[ticker].reindex(calendar)
         if currency != "USD":
             values = values.ffill(limit=foreign_stale_sessions)
-            fx_values = fx[currency].reindex(calendar).ffill(limit=5)
-            if fx_values.isna().any():
-                raise ValueError(f"Missing FX coverage for {currency}")
+            fx_values = _align_fx_to_calendar(
+                fx[currency],
+                calendar,
+                currency=currency,
+                max_stale_sessions=5,
+            )
+            # Keep pre-first-quote prices missing; do not use a future FX rate
+            # to invent historical USD values. This makes foreign tickers
+            # temporarily ineligible at the start of the benchmark calendar.
             values = values * unit_scale * fx_values
         else:
             values = values * unit_scale
