@@ -140,3 +140,37 @@ def test_backtest_requires_benchmark_price_column() -> None:
     prices = _prices().drop(columns=["SPY"])
     with pytest.raises(ValueError, match="benchmark"):
         run_alpha_portfolio_backtest(_predictions(_prices()), prices)
+
+
+def test_signal_is_executed_on_next_session_not_same_close() -> None:
+    prices = _prices()
+    predictions = _predictions(prices)
+    first_signal_date = prices.index[65]
+    next_signal_date = prices.index[66]
+    first_rows = predictions.loc[first_signal_date]
+    predictions.loc[first_signal_date, "expected_excess_return"] = [
+        -int(ticker[1:]) for ticker in first_rows.index
+    ]
+    next_rows = predictions.loc[next_signal_date]
+    predictions.loc[next_signal_date, "expected_excess_return"] = [
+        int(ticker[1:]) for ticker in next_rows.index
+    ]
+
+    report = run_alpha_portfolio_backtest(
+        predictions,
+        prices,
+        config=PortfolioBacktestConfig(
+            top_n=5,
+            min_cross_section=20,
+            rebalance_every=5,
+            transaction_cost_bps=0.0,
+        ),
+    )
+    first_execution_date = prices.index[66]
+    first_holdings = report.holdings.loc[
+        (report.holdings["date"] == first_execution_date)
+        & (report.holdings["strategy"] == "ridge_top_n")
+    ]
+
+    assert set(first_holdings["ticker"]) == {"T00", "T01", "T02", "T03", "T04"}
+    assert set(first_holdings["signal_date"]) == {first_signal_date}
