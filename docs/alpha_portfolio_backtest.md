@@ -79,7 +79,7 @@ The job creates three local CSV files:
 
 - `alpha_portfolio_summary.csv`: total and annualized return, annualized
   volatility, zero-risk-free-rate Sharpe ratio, maximum drawdown, average
-  session turnover, and sum of configured cost rates.
+  session turnover, and the sum of daily charged cost rates (not a compounded cost metric).
 - `alpha_portfolio_daily_returns.csv`: gross return, net return, transaction
   cost rate, turnover, and equity curve for each portfolio.
 - `alpha_portfolio_holdings.csv`: holdings and weights by execution date,
