@@ -208,3 +208,20 @@ def test_max_drawdown_includes_loss_from_initial_cash_value() -> None:
     benchmark = report.summary.set_index("strategy").loc["benchmark"]
 
     assert benchmark["max_drawdown"] <= -0.099
+
+
+def test_backtest_rejects_prediction_ticker_without_price_series() -> None:
+    prices = _prices()
+    predictions = _predictions(prices)
+    with pytest.raises(ValueError, match="missing predicted tickers"):
+        run_alpha_portfolio_backtest(predictions, prices.drop(columns=["T29"]))
+
+
+def test_backtest_rejects_oos_signal_date_missing_from_price_calendar() -> None:
+    prices = _prices()
+    predictions = _predictions(prices)
+    with pytest.raises(ValueError, match="missing OOS signal dates"):
+        run_alpha_portfolio_backtest(
+            predictions,
+            prices.drop(index=prices.index[70]),
+        )
