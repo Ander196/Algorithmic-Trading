@@ -174,3 +174,37 @@ def test_signal_is_executed_on_next_session_not_same_close() -> None:
 
     assert set(first_holdings["ticker"]) == {"T00", "T01", "T02", "T03", "T04"}
     assert set(first_holdings["signal_date"]) == {first_signal_date}
+
+
+def test_missing_next_session_price_for_held_asset_is_not_silently_zeroed() -> None:
+    prices = _prices()
+    prices.loc[prices.index[67], "T29"] = np.nan
+
+    with pytest.raises(ValueError, match="missing next-session returns"):
+        run_alpha_portfolio_backtest(
+            _predictions(prices),
+            prices,
+            config=PortfolioBacktestConfig(
+                top_n=5,
+                min_cross_section=20,
+                transaction_cost_bps=0.0,
+                max_stale_sessions=0,
+            ),
+        )
+
+
+def test_max_drawdown_includes_loss_from_initial_cash_value() -> None:
+    prices = _prices()
+    prices.loc[prices.index[67], "SPY"] = prices.loc[prices.index[66], "SPY"] * 0.9
+    report = run_alpha_portfolio_backtest(
+        _predictions(prices),
+        prices,
+        config=PortfolioBacktestConfig(
+            top_n=5,
+            min_cross_section=20,
+            transaction_cost_bps=0.0,
+        ),
+    )
+    benchmark = report.summary.set_index("strategy").loc["benchmark"]
+
+    assert benchmark["max_drawdown"] <= -0.099
