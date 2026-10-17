@@ -58,8 +58,8 @@ def test_backtest_returns_four_comparable_portfolios_and_metrics() -> None:
         "benchmark",
     }
     assert report.daily_returns.index.is_monotonic_increasing
-    assert report.daily_returns.index.min() == prices.index[65]
-    assert report.daily_returns.index.max() == prices.index[79]
+    assert report.daily_returns.index.min() == prices.index[66]
+    assert report.daily_returns.index.max() == prices.index[80]
     assert (report.daily_returns.filter(like="_equity") > 0).all().all()
     assert {
         "total_return",
