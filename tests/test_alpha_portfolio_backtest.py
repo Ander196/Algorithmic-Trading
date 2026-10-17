@@ -225,3 +225,22 @@ def test_backtest_rejects_oos_signal_date_missing_from_price_calendar() -> None:
             predictions,
             prices.drop(index=prices.index[70]),
         )
+
+
+def test_single_session_price_gap_can_be_tolerated_when_explicitly_enabled() -> None:
+    prices = _prices()
+    prices.loc[prices.index[67], "T29"] = np.nan
+
+    report = run_alpha_portfolio_backtest(
+        _predictions(prices),
+        prices,
+        config=PortfolioBacktestConfig(
+            top_n=5,
+            min_cross_section=20,
+            transaction_cost_bps=0.0,
+            max_stale_sessions=1,
+        ),
+    )
+
+    assert report.daily_returns["ridge_top_n_net_return"].notna().all()
+    assert report.daily_returns["equal_weight_universe_net_return"].notna().all()
