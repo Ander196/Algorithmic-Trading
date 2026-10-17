@@ -1,7 +1,8 @@
 import pandas as pd
 import pytest
 
-from jobs.evaluate_alpha import _to_ohlcv_frame, get_alpha_universe
+from core.alpha_evaluation import AlphaEvaluationReport
+from jobs.evaluate_alpha import _print_diagnostics, _to_ohlcv_frame, get_alpha_universe
 
 
 class _FakeQuery:
@@ -71,3 +72,41 @@ def test_to_ohlcv_frame_rejects_missing_columns() -> None:
 
     with pytest.raises(ValueError, match="missing required columns"):
         _to_ohlcv_frame(raw)
+
+
+
+def test_print_diagnostics_writes_reviewable_csv_files(tmp_path) -> None:
+    rows = []
+    for date_idx, date in enumerate(pd.bdate_range("2024-01-01", periods=3)):
+        for ticker_idx in range(30):
+            momentum = float(ticker_idx) / 100.0
+            rows.append({
+                "date": date,
+                "ticker": f"T{ticker_idx:03d}",
+                "expected_excess_return": momentum,
+                "return_20": momentum,
+                "return_60": momentum / 2.0,
+                "target_excess_return": momentum + (date_idx - 1) / 100.0,
+            })
+    predictions = pd.DataFrame(rows).set_index(["date", "ticker"])
+    report = AlphaEvaluationReport(
+        model_version="test",
+        folds=(),
+        oos_predictions=predictions,
+    )
+
+    _print_diagnostics(
+        report,
+        top_n=5,
+        random_repeats=2,
+        random_seed=17,
+        diagnostics_dir=tmp_path,
+    )
+
+    expected_files = {
+        "alpha_oos_predictions.csv",
+        "alpha_ranking_comparison.csv",
+        "alpha_outlier_sensitivity.csv",
+        "alpha_extreme_returns.csv",
+    }
+    assert expected_files.issubset({path.name for path in tmp_path.iterdir()})

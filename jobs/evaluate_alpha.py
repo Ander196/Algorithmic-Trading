@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
 from supabase import Client
 
 from core.alpha_dataset import AlphaDatasetBuilder, AlphaDatasetConfig
+from core.alpha_diagnostics import evaluate_alpha_diagnostics, extreme_return_rows
 from core.alpha_evaluation import AlphaEvaluationConfig, AlphaEvaluationReport, AlphaEvaluator
 from core.alpha_model import AlphaModelConfig
 from core.walk_forward import WalkForwardConfig, WalkForwardProtocol
@@ -203,6 +205,54 @@ def _print_report(
         print(f"Failed tickers: {', '.join(load_summary.failed_tickers)}")
 
 
+def _print_diagnostics(
+    report: AlphaEvaluationReport,
+    *,
+    top_n: int,
+    random_repeats: int,
+    random_seed: int,
+    diagnostics_dir: Path | None,
+) -> None:
+    """Print out-of-sample baselines and optionally persist audit CSV files."""
+    diagnostics = evaluate_alpha_diagnostics(
+        report.oos_predictions,
+        top_n=top_n,
+        min_cross_section=20,
+        random_repeats=random_repeats,
+        random_seed=random_seed,
+    )
+    print("\n=== Alpha OOS Baseline Comparison ===")
+    print(diagnostics.ranking_comparison.to_string(
+        index=False, float_format=lambda value: f"{value:.6f}"
+    ))
+    print("\n=== Alpha OOS Outlier Sensitivity ===")
+    print(diagnostics.outlier_sensitivity.to_string(
+        index=False, float_format=lambda value: f"{value:.6f}"
+    ))
+
+    extremes = extreme_return_rows(report.oos_predictions, n_per_side=10)
+    print("\n=== Largest OOS Excess-Return Observations ===")
+    print(extremes.to_string(
+        index=False, float_format=lambda value: f"{value:.6f}"
+    ))
+    print(
+        "Diagnostic returns are overlapping five-session labels, not a "
+        "compounded or transaction-cost-adjusted portfolio backtest."
+    )
+
+    if diagnostics_dir is not None:
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        report.oos_predictions.to_csv(diagnostics_dir / "alpha_oos_predictions.csv")
+        diagnostics.ranking_comparison.to_csv(
+            diagnostics_dir / "alpha_ranking_comparison.csv", index=False
+        )
+        diagnostics.outlier_sensitivity.to_csv(
+            diagnostics_dir / "alpha_outlier_sensitivity.csv", index=False
+        )
+        extremes.to_csv(diagnostics_dir / "alpha_extreme_returns.csv", index=False)
+        print(f"Diagnostics written to: {diagnostics_dir.resolve()}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate the V1 Alpha model on Supabase history")
     parser.add_argument("--market-ticker", default="SPY")
@@ -218,7 +268,35 @@ def main() -> None:
         default=None,
         help="Optional cap for local/smoke runs; production evaluation uses the full active universe.",
     )
+    parser.add_argument(
+        "--diagnostics-dir",
+        type=Path,
+        default=None,
+        help="Optional directory for CSV exports of OOS predictions and diagnostics.",
+    )
+    parser.add_argument(
+        "--diagnostics-top-n",
+        type=int,
+        default=5,
+        help="Top-N size used in Alpha and baseline diagnostics (default: 5).",
+    )
+    parser.add_argument(
+        "--random-baseline-repeats",
+        type=int,
+        default=20,
+        help="Number of seeded random rankings averaged for the baseline (default: 20).",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=42,
+        help="Seed for reproducible random-baseline rankings.",
+    )
     args = parser.parse_args()
+    if args.diagnostics_top_n <= 0:
+        parser.error("--diagnostics-top-n must be greater than zero")
+    if args.random_baseline_repeats <= 0:
+        parser.error("--random-baseline-repeats must be greater than zero")
 
     client = get_supabase_client()
     report, load_summary, dataset_rows = evaluate_alpha(
@@ -228,6 +306,13 @@ def main() -> None:
         max_tickers=args.max_tickers,
     )
     _print_report(report, load_summary, dataset_rows)
+    _print_diagnostics(
+        report,
+        top_n=args.diagnostics_top_n,
+        random_repeats=args.random_baseline_repeats,
+        random_seed=args.random_seed,
+        diagnostics_dir=args.diagnostics_dir,
+    )
 
 
 if __name__ == "__main__":
