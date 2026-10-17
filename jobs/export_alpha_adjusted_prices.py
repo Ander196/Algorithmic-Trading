@@ -8,8 +8,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from dotenv import load_dotenv
 
 from jobs.common import get_supabase_client
+
+load_dotenv(".env.secrets")
 
 FX = {
     "EUR": ("EURUSD=X", False),
