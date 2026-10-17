@@ -176,7 +176,8 @@ def _portfolio_summary(
         mean_return / daily_std * np.sqrt(annualization)
         if np.isfinite(daily_std) and daily_std > 0 else float("nan")
     )
-    drawdown = equity / equity.cummax() - 1.0 if periods else pd.Series(dtype=float)
+    running_peak = pd.Series(np.maximum.accumulate(np.r_[1.0, equity.to_numpy()])[1:], index=equity.index) if periods else pd.Series(dtype=float)
+    drawdown = equity / running_peak - 1.0 if periods else pd.Series(dtype=float)
     return {
         "strategy": name,
         "periods": periods,
@@ -221,9 +222,14 @@ def run_alpha_portfolio_backtest(
     first_signal_pos = int(prices.index.get_loc(signal_dates[0]))
     last_signal_pos = int(prices.index.get_loc(signal_dates[-1]))
 
-    # Signals are not tradable at the same close used to calculate them.
+    # Signals are not tradable at the same close used to calculate them. Need
+    # an execution close and one later close for the last OOS signal as well.
     first_pos = first_signal_pos + 1
-    last_pos = min(last_signal_pos + 1, len(prices.index) - 2)
+    last_pos = last_signal_pos + 1
+    if last_pos >= len(prices.index) - 1:
+        raise ValueError(
+            "close_prices must include at least two sessions after the latest OOS signal date"
+        )
     if first_pos > last_pos:
         raise ValueError("no OOS signal date has a subsequent executable session and return")
 
