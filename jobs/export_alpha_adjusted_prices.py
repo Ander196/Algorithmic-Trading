@@ -151,7 +151,9 @@ def export_prices(predictions_csv: Path, output_csv: Path, *, benchmark: str = "
         raise ValueError("Benchmark price series has missing values")
     output = (
         prices.rename_axis(index="date", columns="ticker")
-        .stack(dropna=True).rename("adjusted_close_base").reset_index()
+        .reset_index()
+        .melt(id_vars="date", var_name="ticker", value_name="adjusted_close_base")
+        .dropna(subset=["adjusted_close_base"])
     )
     output["date"] = pd.to_datetime(output["date"]).dt.strftime("%Y-%m-%d")
     output_csv.parent.mkdir(parents=True, exist_ok=True)
