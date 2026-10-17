@@ -43,7 +43,9 @@ The price file must be **long format** with these required fields:
 converted to a **single base currency** on every date. For example, if the
 base currency is USD, a European share price in EUR must also reflect the
 EUR/USD movement before its USD portfolio return is computed. Include SPY in
-the same file for the benchmark.
+the same file for the benchmark. Align the panel to benchmark sessions: on a
+foreign-market holiday, use the last local adjusted close translated at that
+day's FX rate. Do not carry forward a stale local price without updating FX.
 
 The price file must include at least 60 trading sessions before the first OOS
 signal for the momentum calculation, as well as two sessions after the last
@@ -95,9 +97,13 @@ sensitivity to higher costs before interpreting results.
 ## Limitations and decision gate
 
 This backtest is only as reliable as the OOS score history and adjusted-price
-panel. It does not correct survivorship bias if the scores were generated from
-the current active universe, does not model market impact or taxes, and does
-not simulate actual order types, partial fills, liquidity or RiskManager limits.
+panel. It compares the supplied scores with base-currency returns but cannot
+repair an upstream target mismatch. Verify that Alpha training labels and
+features for non-USD listings are currency-consistent with SPY before
+interpreting their aggregate contribution. It does not correct survivorship bias
+if scores were generated from the current active universe, does not model market
+impact or taxes, and does not simulate actual order types, partial fills,
+liquidity or RiskManager limits.
 The equal-weight universe is restricted to the model's eligible OOS rows; it is
 not a point-in-time survivorship-free broad-market index.
 
