@@ -1,9 +1,10 @@
 """Cost-aware out-of-sample Alpha portfolio backtest.
 
-Research-only: signals are observed at close t and earn t-to-next-close
-returns. Prices should be adjusted for corporate actions and expressed in one
-base currency. Stale prices are forward-filled only for a bounded number of
-sessions; a held asset without a valid next-session return is an error.
+Research-only. A score observed at close t is not assumed executable at that
+same close: targets are set at close t+1 and earn returns from close t+1 to
+close t+2. Adjusted prices must include distributions/splits and be expressed
+in one base currency. Missing prices are not filled by default; a held asset
+without a valid next-session return raises an error.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ class PortfolioBacktestConfig:
     transaction_cost_bps: float = 5.0
     min_cross_section: int = 20
     momentum_lookback: int = 60
-    max_stale_sessions: int = 3
+    max_stale_sessions: int = 0
     annualization: int = 252
 
     def __post_init__(self) -> None:
@@ -98,13 +99,16 @@ def _prepare_prices(
         prices[column] = pd.to_numeric(prices[column], errors="coerce")
     values = prices.to_numpy(dtype=float)
     prices = prices.where(np.isfinite(values) & (values > 0))
+    # Tolerating stale observations is opt-in because it can distort daily risk
+    # metrics and move a multi-session price move onto the wrong session.
     if config.max_stale_sessions:
         prices = prices.ffill(limit=config.max_stale_sessions)
     return prices
 
 
 def _weights_for_date(
-    date: pd.Timestamp,
+    execution_date: pd.Timestamp,
+    signal_date: pd.Timestamp,
     rows: pd.DataFrame,
     prices: pd.DataFrame,
     momentum: pd.DataFrame,
@@ -115,16 +119,16 @@ def _weights_for_date(
 ) -> dict[str, float] | None:
     if rows.empty:
         return None
-    current_prices = prices.loc[date]
+    execution_prices = prices.loc[execution_date]
     candidates = rows.loc[
         rows["ticker"].isin(prices.columns)
         & np.isfinite(rows["expected_excess_return"])
     ].copy()
     if candidates.empty:
         return None
-    candidates = candidates.loc[candidates["ticker"].map(current_prices).notna()]
+    candidates = candidates.loc[candidates["ticker"].map(execution_prices).notna()]
     if score_column == "momentum":
-        candidates["__score"] = candidates["ticker"].map(momentum.loc[date])
+        candidates["__score"] = candidates["ticker"].map(momentum.loc[signal_date])
         candidates = candidates.loc[np.isfinite(candidates["__score"])]
     elif score_column == "expected_excess_return":
         candidates["__score"] = candidates["expected_excess_return"]
@@ -195,10 +199,11 @@ def run_alpha_portfolio_backtest(
 ) -> PortfolioBacktestReport:
     """Compare Ridge Top-N, Momentum Top-N, equal-weight universe, and benchmark.
 
-    Equity portfolios are equal-weighted at scheduled rebalance closes, but
-    their weights drift between rebalances with asset returns. Turnover is
-    gross traded notional, sum(abs(new weight - pre-trade drifted weight)), so
-    it includes buys and sells. Cost is turnover * basis-points / 10,000.
+    Signals from close t are executed no earlier than close t+1. The strategy
+    holds between scheduled rebalances; weights drift with asset returns rather
+    than silently assuming free daily rebalancing. Turnover is gross traded
+    notional, sum(abs(new weight - pre-trade drifted weight)), including buys
+    and sells. Transaction cost equals turnover * basis-points / 10,000.
     The benchmark is buy-and-hold and pays its initial purchase cost once.
     """
     config = config or PortfolioBacktestConfig()
@@ -213,12 +218,14 @@ def run_alpha_portfolio_backtest(
     signal_dates = sorted(set(predictions["date"]).intersection(prices.index))
     if len(signal_dates) < 2:
         raise ValueError("at least two OOS signal dates must overlap close_prices")
-    first_pos = int(prices.index.get_loc(signal_dates[0]))
-    last_pos = int(prices.index.get_loc(signal_dates[-1]))
-    if last_pos >= len(prices.index) - 1:
-        last_pos = len(prices.index) - 2
+    first_signal_pos = int(prices.index.get_loc(signal_dates[0]))
+    last_signal_pos = int(prices.index.get_loc(signal_dates[-1]))
+
+    # Signals are not tradable at the same close used to calculate them.
+    first_pos = first_signal_pos + 1
+    last_pos = min(last_signal_pos + 1, len(prices.index) - 2)
     if first_pos > last_pos:
-        raise ValueError("no OOS signal date has a subsequent close price")
+        raise ValueError("no OOS signal date has a subsequent executable session and return")
 
     prediction_groups = {
         pd.Timestamp(date): group.copy()
@@ -239,11 +246,13 @@ def run_alpha_portfolio_backtest(
     holding_rows: list[dict[str, str | float | pd.Timestamp | int]] = []
     session_dates = prices.index[first_pos : last_pos + 1]
 
-    for session_number, date in enumerate(session_dates):
-        day_returns = forward_returns.loc[date]
+    for session_number, execution_date in enumerate(session_dates):
+        execution_pos = int(prices.index.get_loc(execution_date))
+        signal_date = pd.Timestamp(prices.index[execution_pos - 1])
+        day_returns = forward_returns.loc[execution_date]
         if pd.isna(day_returns.get(benchmark_ticker)):
             continue
-        rows = prediction_groups.get(pd.Timestamp(date), pd.DataFrame())
+        rows = prediction_groups.get(signal_date, pd.DataFrame())
         is_rebalance = session_number % config.rebalance_every == 0
         turnover_by_strategy: dict[str, float] = {}
         cost_by_strategy: dict[str, float] = {}
@@ -255,7 +264,7 @@ def run_alpha_portfolio_backtest(
         ):
             if is_rebalance or not holdings[name]:
                 target = _weights_for_date(
-                    pd.Timestamp(date), rows, prices, momentum,
+                    pd.Timestamp(execution_date), signal_date, rows, prices, momentum,
                     top_n=config.top_n,
                     min_cross_section=config.min_cross_section,
                     score_column=score_column,
@@ -264,8 +273,8 @@ def run_alpha_portfolio_backtest(
                     previous = holdings[name]
                     all_tickers = set(previous) | set(target)
                     turnover = float(sum(
-                        abs(target.get(t, 0.0) - previous.get(t, 0.0))
-                        for t in all_tickers
+                        abs(target.get(ticker, 0.0) - previous.get(ticker, 0.0))
+                        for ticker in all_tickers
                     ))
                     holdings[name] = target
                 else:
@@ -283,7 +292,7 @@ def run_alpha_portfolio_backtest(
             turnover_by_strategy["benchmark"] = 0.0
             cost_by_strategy["benchmark"] = 0.0
 
-        daily_row: dict[str, float | pd.Timestamp] = {"date": pd.Timestamp(date)}
+        daily_row: dict[str, float | pd.Timestamp] = {"date": pd.Timestamp(execution_date)}
         gross_by_strategy: dict[str, float] = {}
         for name in _STRATEGIES:
             if name == "benchmark":
@@ -291,10 +300,13 @@ def run_alpha_portfolio_backtest(
             elif not holdings[name]:
                 gross = 0.0
             else:
-                missing = [t for t in holdings[name] if pd.isna(day_returns.get(t))]
+                missing = [
+                    ticker for ticker in holdings[name]
+                    if pd.isna(day_returns.get(ticker))
+                ]
                 if missing:
                     raise ValueError(
-                        f"{name} has missing next-session returns on {date.date()} "
+                        f"{name} has missing next-session returns after {execution_date.date()} "
                         f"for held tickers: {', '.join(sorted(missing))}"
                     )
                 gross = float(sum(
@@ -309,7 +321,8 @@ def run_alpha_portfolio_backtest(
             daily_row[f"{name}_net_return"] = gross - cost
             for ticker, weight in sorted(holdings.get(name, {}).items()):
                 holding_rows.append({
-                    "date": pd.Timestamp(date),
+                    "date": pd.Timestamp(execution_date),
+                    "signal_date": signal_date,
                     "strategy": name,
                     "ticker": ticker,
                     "weight": float(weight),
@@ -317,11 +330,9 @@ def run_alpha_portfolio_backtest(
                 })
         daily_rows.append(daily_row)
 
-        # Let weights drift with realized returns between rebalance closes;
-        # this avoids assuming free daily rebalancing without charging turnover.
+        # Drift relative weights with returns so rebalances alone create trades.
         for name, weights in holdings.items():
-            gross = gross_by_strategy[name]
-            denominator = 1.0 + gross
+            denominator = 1.0 + gross_by_strategy[name]
             if weights and denominator > 0:
                 holdings[name] = {
                     ticker: weight * (1.0 + float(day_returns[ticker])) / denominator
@@ -346,7 +357,7 @@ def run_alpha_portfolio_backtest(
     ])
     holdings_frame = pd.DataFrame(
         holding_rows,
-        columns=["date", "strategy", "ticker", "weight", "session_number"],
+        columns=["date", "signal_date", "strategy", "ticker", "weight", "session_number"],
     )
     return PortfolioBacktestReport(daily, summary, holdings_frame)
 
