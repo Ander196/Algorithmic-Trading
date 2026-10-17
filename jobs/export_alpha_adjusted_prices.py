@@ -133,6 +133,38 @@ def _align_fx_to_calendar(
     return aligned
 
 
+def _select_backtest_calendar(
+    calendar: pd.DatetimeIndex,
+    signal_dates: pd.DatetimeIndex,
+    momentum_lookback: int,
+) -> pd.DatetimeIndex:
+    """Limit FX coverage checks to dates required by the portfolio backtest.
+
+    Retain momentum_lookback benchmark sessions before the first OOS signal and
+    two benchmark sessions after the last signal. Missing FX data months after
+    the OOS window should not invalidate a backtest that never uses those dates.
+    """
+    calendar = pd.DatetimeIndex(calendar).sort_values()
+    signal_dates = pd.DatetimeIndex(signal_dates).sort_values()
+    missing = signal_dates[~signal_dates.isin(calendar)]
+    if len(missing):
+        raise ValueError(
+            "Benchmark price calendar misses OOS dates: "
+            + ", ".join(str(value.date()) for value in missing[:5])
+        )
+    first_pos = int(calendar.get_loc(signal_dates[0]))
+    last_pos = int(calendar.get_loc(signal_dates[-1]))
+    if first_pos < momentum_lookback:
+        raise ValueError(
+            "Not enough benchmark history before first OOS date for momentum"
+        )
+    if last_pos + 2 >= len(calendar):
+        raise ValueError(
+            "Price history must include two benchmark sessions after last OOS date"
+        )
+    return calendar[first_pos - momentum_lookback : last_pos + 3]
+
+
 def export_prices(predictions_csv: Path, output_csv: Path, *, benchmark: str = "SPY",
                   momentum_lookback: int = 60, foreign_stale_sessions: int = 3) -> int:
     if momentum_lookback <= 0:
@@ -160,14 +192,7 @@ def export_prices(predictions_csv: Path, output_csv: Path, *, benchmark: str = "
     native = {ticker: _fetch_adjusted(client, ticker, start) for ticker in tickers}
     calendar = native[benchmark].index.sort_values()
     signal_dates = pd.DatetimeIndex(sorted(predictions["date"].unique()))
-    missing = signal_dates[~signal_dates.isin(calendar)]
-    if len(missing):
-        raise ValueError("Benchmark price calendar misses OOS dates: " + ", ".join(str(x.date()) for x in missing[:5]))
-    first_pos, last_pos = calendar.get_loc(signal_dates[0]), calendar.get_loc(signal_dates[-1])
-    if first_pos < momentum_lookback:
-        raise ValueError("Not enough benchmark history before first OOS date for momentum")
-    if last_pos + 2 >= len(calendar):
-        raise ValueError("Price history must include two benchmark sessions after last OOS date")
+    calendar = _select_backtest_calendar(calendar, signal_dates, momentum_lookback)
 
     currencies = sorted({_currency_scale(t)[0] for t in tickers} - {"USD"})
     fx = {
