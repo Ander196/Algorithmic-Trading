@@ -218,6 +218,19 @@ def export_prices(predictions_csv: Path, output_csv: Path, *, benchmark: str = "
     prices = pd.DataFrame(panel, index=calendar)
     if prices[benchmark].isna().any():
         raise ValueError("Benchmark price series has missing values")
+    missing_by_ticker = prices.isna().sum()
+    affected = missing_by_ticker[missing_by_ticker > 0].sort_values(ascending=False)
+    if not affected.empty:
+        examples = ", ".join(
+            f"{ticker}={int(count)} sessions"
+            for ticker, count in affected.head(12).items()
+        )
+        print(
+            "WARNING: some adjusted prices are missing after bounded local-price/FX "
+            f"alignment ({examples}). The CSV keeps these observations absent rather "
+            "than using future FX quotes. The backtest will fail if a selected holding "
+            "has no valid next-session return."
+        )
     output = (
         prices.rename_axis(index="date", columns="ticker")
         .reset_index()
