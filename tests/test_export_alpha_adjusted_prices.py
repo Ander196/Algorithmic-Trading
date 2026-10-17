@@ -74,3 +74,44 @@ def test_fetch_adjusted_reads_adj_close_and_returns_chronological_series() -> No
 def test_fetch_adjusted_fails_clearly_when_history_is_missing() -> None:
     with pytest.raises(ValueError, match="No adj_close history"):
         _fetch_adjusted(_FakeClient([]), "MISSING", "2024-01-01")
+
+
+from jobs.export_alpha_adjusted_prices import _align_fx_to_calendar
+
+
+def test_fx_alignment_allows_leading_missing_values_without_lookahead() -> None:
+    calendar = pd.bdate_range("2003-12-29", periods=5)
+    quotes = pd.Series(
+        [1.1, 1.12, 1.11],
+        index=pd.DatetimeIndex([calendar[2], calendar[3], calendar[4]]),
+    )
+
+    aligned = _align_fx_to_calendar(quotes, calendar, currency="EUR")
+
+    assert aligned.iloc[:2].isna().all()
+    assert aligned.iloc[2:].notna().all()
+    assert aligned.iloc[0:2].isna().all()
+
+
+def test_fx_alignment_rejects_internal_gap_longer_than_stale_limit() -> None:
+    calendar = pd.bdate_range("2024-01-01", periods=10)
+    quotes = pd.Series(
+        [1.1, 1.11],
+        index=pd.DatetimeIndex([calendar[0], calendar[8]]),
+    )
+
+    with pytest.raises(ValueError, match="Missing FX coverage"):
+        _align_fx_to_calendar(
+            quotes,
+            calendar,
+            currency="EUR",
+            max_stale_sessions=2,
+        )
+
+
+def test_fx_alignment_fails_when_currency_has_no_quotes() -> None:
+    calendar = pd.bdate_range("2024-01-01", periods=5)
+    quotes = pd.Series(dtype=float, index=pd.DatetimeIndex([]))
+
+    with pytest.raises(ValueError, match="No FX coverage"):
+        _align_fx_to_calendar(quotes, calendar, currency="EUR")
