@@ -93,20 +93,23 @@ def test_fx_alignment_allows_leading_missing_values_without_lookahead() -> None:
     assert aligned.iloc[0:2].isna().all()
 
 
-def test_fx_alignment_rejects_internal_gap_longer_than_stale_limit() -> None:
+def test_fx_alignment_preserves_long_internal_gap_as_missing_without_lookahead() -> None:
     calendar = pd.bdate_range("2024-01-01", periods=10)
     quotes = pd.Series(
         [1.1, 1.11],
         index=pd.DatetimeIndex([calendar[0], calendar[8]]),
     )
 
-    with pytest.raises(ValueError, match="Missing FX coverage"):
-        _align_fx_to_calendar(
-            quotes,
-            calendar,
-            currency="EUR",
-            max_stale_sessions=2,
-        )
+    aligned = _align_fx_to_calendar(
+        quotes,
+        calendar,
+        currency="EUR",
+        max_stale_sessions=2,
+    )
+
+    assert aligned.iloc[:3].notna().all()
+    assert aligned.iloc[3:8].isna().all()
+    assert aligned.iloc[8:].notna().all()
 
 
 def test_fx_alignment_fails_when_currency_has_no_quotes() -> None:
