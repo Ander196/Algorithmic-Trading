@@ -41,7 +41,8 @@ class _FakeQuery:
         return self
 
     def range(self, start, end):
-        return self.rows[start : end + 1]
+        self.rows = self.rows[start : end + 1]
+        return self
 
     def execute(self):
         return type("Response", (), {"data": self.rows})()
