@@ -60,7 +60,7 @@ available for controlled diagnostics, but the default should be preferred.
 After producing OOS scores and the base-currency adjusted-price export:
 
 ```powershell
-python -m jobs.backtest_alpha_portfolios --predictions-csv reports/alpha_diagnostics/alpha_oos_predictions.csv --prices-csv reports/adjusted_close_prices_base_currency.csv --output-dir reports/alpha_portfolio_backtest --benchmark-ticker SPY --top-n 5 --rebalance-every 5 --transaction-cost-bps 5
+python -m jobs.backtest_alpha_portfolios --predictions-csv reports/alpha_diagnostics/alpha_oos_predictions.csv --prices-csv reports/adjusted_close_prices_base_currency.csv --output-dir reports/alpha_portfolio_backtest --benchmark-ticker SPY --top-n 5 --rebalance-every 5 --transaction-cost-bps 5 --max-stale-sessions 1
 ```
 
 The prices CSV should resemble:
@@ -149,3 +149,12 @@ allowance is preserved as a missing observation, not filled with a future quote.
 The exporter prints a warning listing tickers with incomplete coverage. The
 portfolio backtest must be stopped if a selected holding would have a missing
 next-session return; do not relax that safety check merely to complete the run.
+
+
+For a one-session missing daily close, the CLI example opts into at most one
+stale benchmark-session per ticker via `--max-stale-sessions 1`. This carries
+the last known close for that single session and therefore assigns no new price
+move until the next available close. It is a bounded data-quality compromise,
+not a substitute for fixing missing source data. Do not increase the limit
+without inspecting the affected tickers and dates. A gap longer than the limit
+must still stop the backtest if a held asset has no valid next-session return.
