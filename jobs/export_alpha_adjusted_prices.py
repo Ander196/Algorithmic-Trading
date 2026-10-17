@@ -107,11 +107,12 @@ def _align_fx_to_calendar(
     currency: str,
     max_stale_sessions: int = 5,
 ) -> pd.Series:
-    """Align FX quotes to benchmark sessions without backfilling future rates.
+    """Align FX quotes without backfilling or extrapolating future rates.
 
-    Leading missing sessions are left NaN because the provider has no earlier
-    observation to support a point-in-time conversion. Once the first FX quote
-    exists, gaps longer than the permitted forward-fill window are rejected.
+    Leading gaps and internal gaps longer than the bounded forward-fill limit
+    remain NaN. This permits prices for unaffected tickers/dates to be exported;
+    the portfolio backtest will reject a missing next-session return if a held
+    asset is affected by one of these gaps.
     """
     if max_stale_sessions < 0:
         raise ValueError("max_stale_sessions must be >= 0")
@@ -125,11 +126,6 @@ def _align_fx_to_calendar(
     valid_positions = np.flatnonzero(aligned.notna().to_numpy())
     if len(valid_positions) == 0:
         raise ValueError(f"No FX coverage for {currency} in the requested date range")
-    first_valid_pos = int(valid_positions[0])
-    if aligned.iloc[first_valid_pos:].isna().any():
-        raise ValueError(
-            f"Missing FX coverage for {currency} after the first available quote"
-        )
     return aligned
 
 
