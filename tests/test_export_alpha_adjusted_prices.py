@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+from io import BytesIO
+from urllib.parse import parse_qs, urlparse
+
 import pandas as pd
 import pytest
 
-from jobs.export_alpha_adjusted_prices import _currency_scale, _fetch_adjusted
+from jobs import export_alpha_adjusted_prices as export_job
+from jobs.export_alpha_adjusted_prices import (
+    _align_fx_to_calendar,
+    _currency_scale,
+    _fetch_adjusted,
+    _fetch_eur_usd_reference,
+    _select_backtest_calendar,
+)
 
 
 @pytest.mark.parametrize(
@@ -76,7 +86,6 @@ def test_fetch_adjusted_fails_clearly_when_history_is_missing() -> None:
         _fetch_adjusted(_FakeClient([]), "MISSING", "2024-01-01")
 
 
-from jobs.export_alpha_adjusted_prices import _align_fx_to_calendar
 
 
 def test_fx_alignment_allows_leading_missing_values_without_lookahead() -> None:
@@ -120,7 +129,6 @@ def test_fx_alignment_fails_when_currency_has_no_quotes() -> None:
         _align_fx_to_calendar(quotes, calendar, currency="EUR")
 
 
-from jobs.export_alpha_adjusted_prices import _select_backtest_calendar
 
 
 def test_fx_calendar_is_limited_to_pre_oos_lookback_and_required_forward_sessions() -> None:
@@ -150,11 +158,6 @@ def test_fx_calendar_selection_rejects_short_pre_oos_history() -> None:
     with pytest.raises(ValueError, match="Not enough benchmark history"):
         _select_backtest_calendar(calendar, signal_dates, momentum_lookback=60)
 
-from io import BytesIO
-from urllib.parse import parse_qs, urlparse
-
-from jobs import export_alpha_adjusted_prices as export_job
-from jobs.export_alpha_adjusted_prices import _fetch_eur_usd_reference
 
 
 def _ecb_csv(
