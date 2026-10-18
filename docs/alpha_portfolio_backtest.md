@@ -29,7 +29,11 @@ Use the CSV exported by the Alpha OOS diagnostics job, such as
 - `expected_excess_return`
 
 The predictions must come from chronological held-out/walk-forward folds. Do
-not feed in-sample model predictions into the backtest.
+not feed in-sample model predictions into the backtest. The evaluation job keeps
+the established 756-session training window and 126-session test/step cadence,
+but now includes a final partial test fold to bring the OOS report up to the
+latest available history. Because the target uses a five-session forward return,
+the final scored signal dates naturally stop before the last stored price date.
 
 ### Adjusted prices
 
