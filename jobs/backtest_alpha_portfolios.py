@@ -128,12 +128,15 @@ def main() -> None:
         parser.error(str(exc))
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    oos_start = report.daily_returns.index.min().date().isoformat()
+    oos_end = report.daily_returns.index.max().date().isoformat()
     report.summary.to_csv(args.output_dir / "alpha_portfolio_summary.csv", index=False)
     report.daily_returns.to_csv(args.output_dir / "alpha_portfolio_daily_returns.csv")
     report.holdings.to_csv(args.output_dir / "alpha_portfolio_holdings.csv", index=False)
     sensitivity.to_csv(
         args.output_dir / "alpha_portfolio_cost_sensitivity.csv", index=False
     )
+    print(f"\nOOS execution-return window: {oos_start} through {oos_end} ({len(report.daily_returns):,} sessions)")
     print("\n=== OOS Portfolio Backtest (net of configured costs) ===")
     print(report.summary.to_string(index=False, float_format=lambda value: f"{value:.6f}"))
     print("\n=== Transaction-Cost Sensitivity ===")
