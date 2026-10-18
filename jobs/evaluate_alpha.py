@@ -66,9 +66,11 @@ def _to_ohlcv_frame(data: pd.DataFrame) -> pd.DataFrame:
         frame["adj_close"] = pd.to_numeric(frame["adj_close"], errors="coerce")
         close = frame["close"].to_numpy(dtype=float)
         adj_close = frame["adj_close"].to_numpy(dtype=float)
-        factor = adj_close / close
+        factor = np.full(close.shape, np.nan, dtype=float)
+        valid_close = np.isfinite(close) & (close > 0)
+        np.divide(adj_close, close, out=factor, where=valid_close)
         valid = (
-            np.isfinite(close) & (close > 0)
+            valid_close
             & np.isfinite(adj_close) & (adj_close > 0)
             & np.isfinite(factor) & (factor > 0)
         )
@@ -129,6 +131,23 @@ def _convert_stock_histories_to_usd(
         )
         usd_factor = fx_values * unit_scale
         valid_fx = usd_factor.notna() & np.isfinite(usd_factor) & (usd_factor > 0)
+        valid_positions = np.flatnonzero(valid_fx.to_numpy())
+        if not len(valid_positions):
+            raise ValueError(f"{ticker}: no valid {currency}/USD conversion rates")
+        # Leading gaps can reflect the beginning of FX source coverage and are
+        # excluded. Internal/trailing gaps beyond the bounded fill limit would
+        # compress the stock's time index and distort multi-session labels, so
+        # stop rather than silently turn five sessions into a longer horizon.
+        first_valid = int(valid_positions[0])
+        if not valid_fx.iloc[first_valid:].all():
+            gap_dates = valid_fx.index[first_valid:][
+                ~valid_fx.iloc[first_valid:].to_numpy()
+            ]
+            sample = ", ".join(pd.Timestamp(date).date().isoformat() for date in gap_dates[:5])
+            raise ValueError(
+                f"{ticker}: internal/trailing {currency}/USD FX gap after bounded "
+                f"forward-fill at {sample}"
+            )
         frame = frame.loc[valid_fx].copy()
         usd_factor = usd_factor.loc[valid_fx]
         for column in ("open", "high", "low", "close"):
