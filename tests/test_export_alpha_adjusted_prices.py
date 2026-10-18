@@ -350,3 +350,39 @@ def test_non_eur_fx_keeps_using_yahoo(monkeypatch) -> None:
 
     assert actual.index.tolist() == [pd.Timestamp("2024-01-02")]
     assert actual.tolist() == [1.25]
+
+
+
+def test_export_prices_excludes_wbd_before_fetching_supabase_history(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-04-01", periods=100)
+    requested = []
+
+    def fake_fetch_adjusted(_client, ticker, _start):
+        requested.append(ticker)
+        return pd.Series(
+            [100.0 + index for index in range(len(dates))],
+            index=dates,
+            name=ticker,
+        )
+
+    monkeypatch.setattr(export_job, "get_supabase_client", lambda: object())
+    monkeypatch.setattr(export_job, "_fetch_adjusted", fake_fetch_adjusted)
+
+    predictions_path = tmp_path / "predictions.csv"
+    output_path = tmp_path / "prices.csv"
+    pd.DataFrame({
+        "date": [dates[65], dates[65], dates[66]],
+        "ticker": ["AAPL", "WBD", "AAPL"],
+        "expected_excess_return": [0.01, 0.99, 0.02],
+    }).to_csv(predictions_path, index=False)
+
+    export_job.export_prices(
+        predictions_path,
+        output_path,
+        benchmark="SPY",
+        momentum_lookback=60,
+    )
+
+    result = pd.read_csv(output_path)
+    assert set(requested) == {"AAPL", "SPY"}
+    assert "WBD" not in set(result["ticker"])
