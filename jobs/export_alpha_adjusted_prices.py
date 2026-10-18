@@ -16,6 +16,7 @@ import truststore
 import yfinance as yf
 from dotenv import load_dotenv
 
+from data.excluded_tickers import filter_excluded_ticker_rows, is_excluded_ticker
 from jobs.common import get_supabase_client
 
 load_dotenv(".env.secrets")
@@ -315,6 +316,16 @@ def export_prices(predictions_csv: Path, output_csv: Path, *, benchmark: str = "
     predictions["ticker"] = predictions["ticker"].astype(str).str.strip().str.upper()
     if predictions[["date", "ticker"]].isna().any().any():
         raise ValueError("predictions CSV contains empty date/ticker values")
+    predictions, excluded_tickers = filter_excluded_ticker_rows(predictions)
+    if excluded_tickers:
+        print(
+            "Excluding retired/invalid tickers from price export: "
+            + ", ".join(excluded_tickers)
+        )
+    if predictions.empty:
+        raise ValueError("predictions contain no eligible tickers after exclusions")
+    if is_excluded_ticker(benchmark):
+        raise ValueError(f"benchmark ticker {benchmark!r} is excluded")
     if predictions.duplicated(["date", "ticker"]).any():
         raise ValueError("predictions CSV contains duplicate date/ticker keys")
 
