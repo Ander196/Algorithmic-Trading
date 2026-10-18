@@ -8,6 +8,7 @@ from jobs.audit_alpha_price_coverage import (
     _calibrate_price_scale,
     _find_repair_dates,
     _normalize_yahoo_history,
+    _read_predictions,
     _render_repair_sql,
     _stored_row_invalid_reasons,
 )
@@ -173,3 +174,18 @@ def test_render_repair_sql_is_idempotent_and_updates_only_invalid_rows() -> None
     assert "target.adj_close IS NULL" in sql
     assert "DATE '2024-01-02'" in sql
     assert "DATE '2024-01-03'" in sql
+
+
+
+def test_read_predictions_excludes_wbd_from_coverage_audit(tmp_path) -> None:
+    path = tmp_path / "predictions.csv"
+    pd.DataFrame({
+        "date": ["2026-07-28", "2026-07-28", "2026-07-29"],
+        "ticker": ["AAPL", "WBD", "WBD"],
+    }).to_csv(path, index=False)
+
+    rows, signal_dates, tickers = _read_predictions(path)
+
+    assert tickers == ["AAPL"]
+    assert rows["ticker"].tolist() == ["AAPL"]
+    assert signal_dates.tolist() == [pd.Timestamp("2026-07-28")]
