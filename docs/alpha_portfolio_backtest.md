@@ -129,7 +129,7 @@ conclusion about Alpha's incremental economic value.
 Run the OOS evaluation and save its diagnostics. To compare the same currency-adjusted pipeline through a historical signal-date cutoff and the latest available data, use separate output directories:
 
 ```powershell
-python -m jobs.evaluate_alpha --evaluation-end-date 2026-07-20 --diagnostics-dir reports/alpha_diagnostics_20260720_usd
+python -m jobs.evaluate_alpha --evaluation-end-date 2026-07-17 --diagnostics-dir reports/alpha_diagnostics_20260720_usd
 python -m jobs.evaluate_alpha --diagnostics-dir reports/alpha_diagnostics_20261018_usd
 ```
 
