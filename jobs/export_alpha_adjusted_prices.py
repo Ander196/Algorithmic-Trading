@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import ssl
 from datetime import timedelta
+from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
+import truststore
 import yfinance as yf
 from dotenv import load_dotenv
 
@@ -15,7 +20,6 @@ from jobs.common import get_supabase_client
 load_dotenv(".env.secrets")
 
 FX = {
-    "EUR": ("EURUSD=X", False),
     "GBP": ("GBPUSD=X", False),
     "CHF": ("USDCHF=X", True),
     "SEK": ("USDSEK=X", True),
@@ -75,7 +79,96 @@ def _fetch_adjusted(client, ticker: str, start: str) -> pd.Series:
     return pd.Series(frame["adj_close"].to_numpy(), index=pd.DatetimeIndex(frame["date"]), name=ticker).sort_index()
 
 
+def _fetch_eur_usd_reference(start: str, end: str) -> pd.Series:
+    """Fetch daily USD-per-EUR reference rates from the ECB Data Portal.
+
+    A dedicated truststore SSLContext uses the operating system certificate
+    store where supported (including Windows) without disabling TLS checks or
+    modifying SSL settings globally.
+    """
+    query = urlencode(
+        {
+            "startPeriod": start,
+            "endPeriod": end,
+            "format": "csvdata",
+        }
+    )
+    url = (
+        "https://data-api.ecb.europa.eu/service/data/EXR/"
+        f"D.USD.EUR.SP00.A?{query}"
+    )
+    request = Request(
+        url,
+        headers={
+            "Accept": "text/csv",
+            "User-Agent": "Algorithmic-Trading/1.0",
+        },
+    )
+    context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    try:
+        with urlopen(request, context=context, timeout=30) as response:
+            payload = response.read()
+    except (OSError, TimeoutError) as exc:
+        raise RuntimeError(
+            f"Could not download ECB EUR/USD reference rates for {start} to {end}: {exc}"
+        ) from exc
+
+    try:
+        frame = pd.read_csv(BytesIO(payload))
+    except (pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeDecodeError) as exc:
+        raise ValueError(f"ECB returned an unreadable EUR/USD CSV response: {exc}") from exc
+
+    required = {"TIME_PERIOD", "OBS_VALUE"}
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(
+            f"ECB EUR/USD response is missing required columns: {sorted(missing)}"
+        )
+
+    # Validate the returned series identity when the API supplies its dimensions.
+    expected_dimensions = {
+        "FREQ": "D",
+        "CURRENCY": "USD",
+        "CURRENCY_DENOM": "EUR",
+        "EXR_TYPE": "SP00",
+        "EXR_SUFFIX": "A",
+    }
+    for column, expected in expected_dimensions.items():
+        if column in frame.columns:
+            observed = set(frame[column].dropna().astype(str).unique())
+            if observed and observed != {expected}:
+                raise ValueError(
+                    f"ECB EUR/USD response has unexpected {column} values: "
+                    f"{sorted(observed)}"
+                )
+
+    dates = pd.to_datetime(frame["TIME_PERIOD"], errors="coerce").dt.normalize()
+    values = pd.to_numeric(frame["OBS_VALUE"], errors="coerce")
+    valid = dates.notna() & np.isfinite(values) & (values > 0)
+    observations = pd.DataFrame(
+        {"date": dates.loc[valid], "rate": values.loc[valid]}
+    )
+    observations = observations.loc[
+        observations["date"].between(pd.Timestamp(start), pd.Timestamp(end))
+    ]
+    if observations.empty:
+        raise RuntimeError(
+            f"ECB returned no valid EUR/USD reference rates for {start} to {end}"
+        )
+    if observations["date"].duplicated().any():
+        raise ValueError("ECB EUR/USD response contains duplicate observation dates")
+
+    return pd.Series(
+        observations["rate"].to_numpy(dtype=float),
+        index=pd.DatetimeIndex(observations["date"]),
+        name="EUR",
+    ).sort_index()
+
+
 def _fx_usd_per_unit(currency: str, start: str, end: str) -> pd.Series:
+    """Return USD per unit of currency using the ECB for EUR and Yahoo otherwise."""
+    if currency == "EUR":
+        return _fetch_eur_usd_reference(start, end)
     if currency not in FX:
         raise ValueError(f"Unsupported FX currency {currency}")
     symbol, inverse = FX[currency]
@@ -98,7 +191,6 @@ def _fx_usd_per_unit(currency: str, start: str, end: str) -> pd.Series:
     if inverse:
         series = 1.0 / series
     return series
-
 
 def _align_fx_to_calendar(
     fx_series: pd.Series,
