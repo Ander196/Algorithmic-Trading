@@ -165,10 +165,10 @@ def _ecb_csv(
     frequency: str = "D",
 ) -> bytes:
     return (
-        "KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE\\n"
+        "KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE\n"
         + "".join(
             f"EXR.D.USD.EUR.SP00.A,{frequency},{currency},{denominator},"
-            f"SP00,A,{row}\\n"
+            f"SP00,A,{row}\n"
             for row in rows.splitlines()
             if row.strip()
         )
@@ -177,7 +177,7 @@ def _ecb_csv(
 
 def test_eur_fx_uses_ecb_csv_and_system_truststore(monkeypatch) -> None:
     payload = _ecb_csv(
-        "2008-08-13,1.4903\\n2008-08-14,1.4907"
+        "2008-08-13,1.4903\n2008-08-14,1.4907"
     )
     requests = []
     marker_context = object()
@@ -235,7 +235,7 @@ def test_eur_fx_rejects_response_without_required_columns(monkeypatch) -> None:
     monkeypatch.setattr(
         export_job,
         "urlopen",
-        lambda *_args, **_kwargs: BytesIO(b"wrong_column\\nfoo\\n"),
+        lambda *_args, **_kwargs: BytesIO(b"wrong_column\nfoo\n"),
     )
 
     with pytest.raises(ValueError, match="missing required columns"):
