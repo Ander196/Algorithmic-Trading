@@ -4,6 +4,7 @@ import pytest
 from jobs.backtest_alpha_portfolios import (
     _load_adjusted_price_panel,
     _load_predictions,
+    _parse_cost_sensitivity_bps,
 )
 
 
@@ -46,3 +47,24 @@ def test_load_adjusted_price_panel_rejects_duplicate_ticker_dates(tmp_path) -> N
 
     with pytest.raises(ValueError, match="duplicate"):
         _load_adjusted_price_panel(path)
+
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("5,10,25", (5.0, 10.0, 25.0)),
+        (" 0, 5 ", (0.0, 5.0)),
+    ],
+)
+def test_parse_cost_sensitivity_bps_accepts_valid_scenarios(raw, expected) -> None:
+    assert _parse_cost_sensitivity_bps(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["", "5,,10", "abc", "-1,5", "nan,10", "5,5"],
+)
+def test_parse_cost_sensitivity_bps_rejects_invalid_scenarios(raw) -> None:
+    with pytest.raises(ValueError):
+        _parse_cost_sensitivity_bps(raw)
