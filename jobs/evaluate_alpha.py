@@ -18,6 +18,7 @@ import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from supabase import Client
 
@@ -27,6 +28,11 @@ from core.alpha_evaluation import AlphaEvaluationConfig, AlphaEvaluationReport, 
 from core.alpha_model import AlphaModelConfig
 from core.walk_forward import WalkForwardConfig, WalkForwardProtocol
 from jobs.common import fetch_price_history, get_supabase_client
+from jobs.export_alpha_adjusted_prices import (
+    _align_fx_to_calendar,
+    _currency_scale,
+    _fx_usd_per_unit,
+)
 from dotenv import load_dotenv
 
 from data.excluded_tickers import is_excluded_ticker, normalize_ticker
@@ -42,7 +48,7 @@ class AlphaLoadSummary:
 
 
 def _to_ohlcv_frame(data: pd.DataFrame) -> pd.DataFrame:
-    """Convert the shared Supabase history format into Alpha OHLCV input."""
+    """Convert Supabase history to OHLCV with split/dividend-adjusted prices."""
     required = {"price_date", "open", "high", "low", "close", "volume"}
     missing = required - set(data.columns)
     if missing:
@@ -50,11 +56,86 @@ def _to_ohlcv_frame(data: pd.DataFrame) -> pd.DataFrame:
 
     frame = data.copy()
     frame["price_date"] = pd.to_datetime(frame["price_date"], utc=True).dt.tz_convert(None)
+    for column in ("open", "high", "low", "close"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
+    # When adj_close exists, apply its per-row factor to all OHLC fields. This
+    # handles both already-adjusted rows (factor ~= 1) and raw OHLC rows whose
+    # adjusted close includes the split/dividend adjustment.
+    if "adj_close" in frame.columns:
+        frame["adj_close"] = pd.to_numeric(frame["adj_close"], errors="coerce")
+        close = frame["close"].to_numpy(dtype=float)
+        adj_close = frame["adj_close"].to_numpy(dtype=float)
+        factor = adj_close / close
+        valid = (
+            np.isfinite(close) & (close > 0)
+            & np.isfinite(adj_close) & (adj_close > 0)
+            & np.isfinite(factor) & (factor > 0)
+        )
+        frame = frame.loc[valid].copy()
+        factor = factor[valid]
+        if frame.empty:
+            raise ValueError("price history has no rows with valid adjusted close")
+        for column in ("open", "high", "low", "close"):
+            frame[column] = frame[column].to_numpy(dtype=float) * factor
+
     return (
         frame.set_index("price_date")
         .sort_index()[["open", "high", "low", "close", "volume"]]
         .copy()
     )
+
+
+def _convert_stock_histories_to_usd(
+    stock_data: dict[str, pd.DataFrame],
+    market_data: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    """Convert adjusted OHLC prices to USD before building Alpha features/labels.
+
+    FX is aligned to each local trading calendar using bounded forward-fill only;
+    no future exchange rate is used to fill a leading or extended internal gap.
+    """
+    if not stock_data:
+        return {}
+
+    date_indexes = [pd.DatetimeIndex(frame.index) for frame in stock_data.values()]
+    date_indexes.append(pd.DatetimeIndex(market_data.index))
+    first_date = min(index.min() for index in date_indexes if len(index))
+    last_date = max(index.max() for index in date_indexes if len(index))
+    start = pd.Timestamp(first_date).strftime("%Y-%m-%d")
+    end = pd.Timestamp(last_date).strftime("%Y-%m-%d")
+
+    currencies = sorted(
+        {_currency_scale(ticker)[0] for ticker in stock_data} - {"USD"}
+    )
+    fx_by_currency = {
+        currency: _fx_usd_per_unit(currency, start, end)
+        for currency in currencies
+    }
+
+    converted: dict[str, pd.DataFrame] = {}
+    for ticker, history in stock_data.items():
+        currency, unit_scale = _currency_scale(ticker)
+        frame = history.copy()
+        if currency == "USD":
+            converted[ticker] = frame
+            continue
+
+        fx_values = _align_fx_to_calendar(
+            fx_by_currency[currency],
+            pd.DatetimeIndex(frame.index),
+            currency=currency,
+            max_stale_sessions=5,
+        )
+        usd_factor = fx_values * unit_scale
+        valid_fx = usd_factor.notna() & np.isfinite(usd_factor) & (usd_factor > 0)
+        frame = frame.loc[valid_fx].copy()
+        usd_factor = usd_factor.loc[valid_fx]
+        for column in ("open", "high", "low", "close"):
+            frame[column] = frame[column].to_numpy(dtype=float) * usd_factor.to_numpy(dtype=float)
+        converted[ticker] = frame
+
+    return converted
 
 
 def get_alpha_universe(
@@ -87,7 +168,9 @@ def load_alpha_inputs(
     if history_limit is not None and history_limit <= 0:
         raise ValueError("history_limit must be greater than zero")
 
-    market_raw = fetch_price_history(client, market_ticker, limit=history_limit)
+    market_raw = fetch_price_history(
+        client, market_ticker, limit=history_limit, include_adj_close=True
+    )
     market_data = _to_ohlcv_frame(market_raw)
 
     stock_data: dict[str, pd.DataFrame] = {}
@@ -96,7 +179,9 @@ def load_alpha_inputs(
     for ticker in tickers:
         try:
             stock_data[ticker] = _to_ohlcv_frame(
-                fetch_price_history(client, ticker, limit=history_limit)
+                fetch_price_history(
+                    client, ticker, limit=history_limit, include_adj_close=True
+                )
             )
         except Exception as exc:
             failed.append(ticker)
@@ -140,6 +225,9 @@ def evaluate_alpha(
         horizon_days=5,
         market_ticker=market_ticker,
     )
+    # Predict and train on total-return-adjusted OHLC in one USD base currency.
+    # This is necessary for excess-return labels to be comparable with SPY.
+    stock_data = _convert_stock_histories_to_usd(stock_data, market_data)
     dataset = AlphaDatasetBuilder(dataset_config).build(
         stock_data,
         market_data,
