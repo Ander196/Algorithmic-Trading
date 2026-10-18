@@ -217,11 +217,29 @@ def load_alpha_inputs(
     )
 
 
+def _filter_dataset_by_evaluation_end_date(
+    dataset: pd.DataFrame,
+    evaluation_end_date: str | pd.Timestamp | None,
+) -> pd.DataFrame:
+    """Limit OOS signal dates for a same-assumption historical comparison."""
+    if evaluation_end_date is None:
+        return dataset
+    cutoff = pd.Timestamp(evaluation_end_date).normalize()
+    dates = pd.DatetimeIndex(pd.to_datetime(dataset.index.get_level_values("date")))
+    filtered = dataset.loc[dates <= cutoff].copy()
+    if filtered.empty:
+        raise ValueError(
+            f"No Alpha dataset rows are available on or before {cutoff.date()}"
+        )
+    return filtered
+
+
 def evaluate_alpha(
     client: Client,
     market_ticker: str = "SPY",
     history_limit: int | None = None,
     max_tickers: int | None = None,
+    evaluation_end_date: str | pd.Timestamp | None = None,
 ) -> tuple[AlphaEvaluationReport, AlphaLoadSummary, int]:
     """Build the real-data Alpha dataset and return its OOS evaluation report."""
     universe = get_alpha_universe(client, market_ticker)
@@ -251,6 +269,7 @@ def evaluate_alpha(
         stock_data,
         market_data,
     )
+    dataset = _filter_dataset_by_evaluation_end_date(dataset, evaluation_end_date)
 
     protocol = WalkForwardProtocol(
         WalkForwardConfig(
@@ -367,6 +386,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate the V1 Alpha model on Supabase history")
     parser.add_argument("--market-ticker", default="SPY")
     parser.add_argument(
+        "--evaluation-end-date",
+        default=None,
+        help="Optional last OOS signal date (YYYY-MM-DD), for same-assumption historical comparisons.",
+    )
+    parser.add_argument(
         "--history-limit",
         type=int,
         default=None,
@@ -414,6 +438,7 @@ def main() -> None:
         market_ticker=args.market_ticker,
         history_limit=args.history_limit,
         max_tickers=args.max_tickers,
+        evaluation_end_date=args.evaluation_end_date,
     )
     _print_report(report, load_summary, dataset_rows)
     _print_diagnostics(
