@@ -12,6 +12,7 @@ def test_fetch_price_data_requests_adjusted_ohlc_and_uses_same_adj_close(monkeyp
             "High": [12.0],
             "Low": [9.0],
             "Close": [11.0],
+            "Adj Close": [10.75],
             "Volume": [100],
         },
         index=pd.DatetimeIndex(["2026-10-15"]),
@@ -33,7 +34,7 @@ def test_fetch_price_data_requests_adjusted_ohlc_and_uses_same_adj_close(monkeyp
 
     assert result is not None
     assert len(result) == 1
-    assert calls[0]["auto_adjust"] is True
+    assert calls[0]["auto_adjust"] is False
     assert calls[0]["actions"] is False
     assert result.loc[0, "close"] == 11.0
-    assert result.loc[0, "adj_close"] == 11.0
+    assert result.loc[0, "adj_close"] == 10.75
