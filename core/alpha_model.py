@@ -60,7 +60,7 @@ class AlphaModel:
     V1 uses regularized Ridge regression as a transparent baseline.
     """
 
-    MODEL_VERSION = "ridge-v1"
+    MODEL_VERSION = "ridge-v1-usd-adjusted"
 
     def __init__(self, config: AlphaModelConfig | None = None) -> None:
         self.config = config or AlphaModelConfig()
