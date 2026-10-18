@@ -79,12 +79,12 @@ def fetchPriceData(
     for attempt in range(retries):
         try:
             stock = yf.Ticker(ticker)
-            # Explicitly request total-return adjusted OHLC, independent of the
-            # yfinance version's changing auto_adjust default.
+            # Preserve the existing database OHLC basis while explicitly fetching
+            # Yahoo's separately adjusted-close series for total-return research.
             df = stock.history(
                 start=startDate,
                 end=endDate,
-                auto_adjust=True,
+                auto_adjust=False,
                 actions=False,
             )
 
@@ -99,6 +99,7 @@ def fetchPriceData(
                 "High": "high",
                 "Low": "low",
                 "Close": "close",
+                "Adj Close": "adj_close",
                 "Volume": "volume",
                 "Dividends": "dividends",
                 "Stock Splits": "stock_splits",
@@ -113,15 +114,16 @@ def fetchPriceData(
                 )
                 return None
 
-            df = df[keepCols].copy()
+            if "adj_close" not in df.columns:
+                print(
+                    f"  {ticker}: rejecting provider response; missing adjusted-close series"
+                )
+                return None
+
+            df = df[keepCols + ["adj_close"]].copy()
             df["ticker"] = ticker
             df["price_date"] = df.index.strftime("%Y-%m-%d")
             df = df.reset_index(drop=True)
-
-            # With auto_adjust=True, OHLC prices are already adjusted for
-            # splits and distributions. Use the same basis for adj_close rather
-            # than reading an ambiguous current value from ticker.info.
-            df["adj_close"] = df["close"]
 
             return validate_ohlcv_frame(df, ticker)
 
