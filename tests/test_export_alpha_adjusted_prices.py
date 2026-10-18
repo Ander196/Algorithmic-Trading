@@ -149,3 +149,117 @@ def test_fx_calendar_selection_rejects_short_pre_oos_history() -> None:
 
     with pytest.raises(ValueError, match="Not enough benchmark history"):
         _select_backtest_calendar(calendar, signal_dates, momentum_lookback=60)
+
+from io import BytesIO
+from urllib.parse import parse_qs, urlparse
+
+from jobs import export_alpha_adjusted_prices as export_job
+from jobs.export_alpha_adjusted_prices import _fetch_eur_usd_reference
+
+
+def _ecb_csv(
+    rows: str,
+    *,
+    currency: str = "USD",
+    denominator: str = "EUR",
+    frequency: str = "D",
+) -> bytes:
+    return (
+        "KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE\\n"
+        + "".join(
+            f"EXR.D.USD.EUR.SP00.A,{frequency},{currency},{denominator},"
+            f"SP00,A,{row}\\n"
+            for row in rows.splitlines()
+            if row.strip()
+        )
+    ).encode("utf-8")
+
+
+def test_eur_fx_uses_ecb_csv_and_system_truststore(monkeypatch) -> None:
+    payload = _ecb_csv(
+        "2008-08-13,1.4903\\n2008-08-14,1.4907"
+    )
+    requests = []
+    marker_context = object()
+
+    class FakeResponse(BytesIO):
+        pass
+
+    def fake_urlopen(request, *, context, timeout):
+        requests.append((request, context, timeout))
+        return FakeResponse(payload)
+
+    monkeypatch.setattr(export_job, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        export_job.truststore,
+        "SSLContext",
+        lambda protocol: marker_context,
+    )
+
+    result = _fetch_eur_usd_reference("2008-08-01", "2008-08-31")
+
+    assert result.index.tolist() == [
+        pd.Timestamp("2008-08-13"),
+        pd.Timestamp("2008-08-14"),
+    ]
+    assert result.tolist() == pytest.approx([1.4903, 1.4907])
+    request, context, timeout = requests[0]
+    query = parse_qs(urlparse(request.full_url).query)
+    assert urlparse(request.full_url).path.endswith(
+        "/service/data/EXR/D.USD.EUR.SP00.A"
+    )
+    assert query == {
+        "startPeriod": ["2008-08-01"],
+        "endPeriod": ["2008-08-31"],
+        "format": ["csvdata"],
+    }
+    assert context is marker_context
+    assert timeout == 30
+    assert request.get_header("Accept") == "text/csv"
+
+
+def test_eur_fx_rejects_unexpected_currency_dimensions(monkeypatch) -> None:
+    monkeypatch.setattr(
+        export_job,
+        "urlopen",
+        lambda *_args, **_kwargs: BytesIO(
+            _ecb_csv("2008-08-13,1.4903", currency="GBP")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="unexpected CURRENCY"):
+        _fetch_eur_usd_reference("2008-08-01", "2008-08-31")
+
+
+def test_eur_fx_rejects_response_without_required_columns(monkeypatch) -> None:
+    monkeypatch.setattr(
+        export_job,
+        "urlopen",
+        lambda *_args, **_kwargs: BytesIO(b"wrong_column\\nfoo\\n"),
+    )
+
+    with pytest.raises(ValueError, match="missing required columns"):
+        _fetch_eur_usd_reference("2008-08-01", "2008-08-31")
+
+
+def test_eur_fx_rejects_response_with_no_valid_observations(monkeypatch) -> None:
+    monkeypatch.setattr(
+        export_job,
+        "urlopen",
+        lambda *_args, **_kwargs: BytesIO(
+            _ecb_csv("2008-08-13,not-a-number")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="no valid EUR/USD reference rates"):
+        _fetch_eur_usd_reference("2008-08-01", "2008-08-31")
+
+
+def test_eur_fx_wraps_network_errors_without_disabling_tls(monkeypatch) -> None:
+    def fail_urlopen(*_args, **_kwargs):
+        raise OSError("certificate verify failed")
+
+    monkeypatch.setattr(export_job, "urlopen", fail_urlopen)
+
+    with pytest.raises(RuntimeError, match="Could not download ECB EUR/USD"):
+        _fetch_eur_usd_reference("2008-08-01", "2008-08-31")
