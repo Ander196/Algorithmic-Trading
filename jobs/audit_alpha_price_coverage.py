@@ -24,6 +24,7 @@ SUMMARY_COLUMNS = (
     "yahoo_sessions",
     "supabase_sessions",
     "missing_sessions",
+    "invalid_sessions",
     "repair_candidates",
     "calibration_observations",
     "scale_factor",
@@ -34,7 +35,9 @@ SUMMARY_COLUMNS = (
 GAP_COLUMNS = (
     "ticker",
     "date",
+    "action",
     "classification",
+    "validation_reasons",
     "yahoo_adj_close",
     "scale_factor",
     "p95_relative_dispersion",
@@ -142,19 +145,15 @@ def _fetch_yahoo_history(
     raise RuntimeError(f"Yahoo history failed for {ticker}: {last_error}")
 
 
-def _fetch_supabase_adjusted(
-    client,
-    ticker: str,
-    start: str,
-) -> pd.Series:
-    """Read adjusted closes with pagination; an absent ticker returns an empty series."""
+def _fetch_supabase_prices(client, ticker: str, start: str) -> pd.DataFrame:
+    """Read all OHLCV fields with pagination, preserving rows with invalid values."""
     records: list[dict] = []
     offset = 0
     page_size = 1000
     while True:
         response = (
             client.table("stock_prices")
-            .select("price_date,adj_close")
+            .select("price_date,open,high,low,close,adj_close,volume")
             .eq("ticker", ticker)
             .gte("price_date", start)
             .order("price_date")
@@ -169,23 +168,65 @@ def _fetch_supabase_adjusted(
         if len(batch) < page_size:
             break
     if not records:
-        return pd.Series(dtype=float, index=pd.DatetimeIndex([]), name=ticker)
+        return pd.DataFrame(
+            columns=OHLCV_COLUMNS,
+            index=pd.DatetimeIndex([], name="date"),
+        )
 
     frame = pd.DataFrame(records)
-    dates = pd.to_datetime(frame["price_date"], errors="raise")
-    if getattr(dates.dt, "tz", None) is not None:
-        dates = dates.dt.tz_convert(None)
-    frame["date"] = dates.dt.normalize()
-    frame["adj_close"] = pd.to_numeric(frame["adj_close"], errors="coerce")
-    frame = frame.loc[np.isfinite(frame["adj_close"]) & (frame["adj_close"] > 0)]
-    if frame["date"].duplicated().any():
+    dates = pd.to_datetime(frame["price_date"], errors="raise", utc=True)
+    frame["date"] = dates.dt.tz_convert(None).dt.normalize()
+    for column in OHLCV_COLUMNS:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame.set_index("date").sort_index()
+    if frame.index.has_duplicates:
         raise ValueError(f"Supabase has duplicate price dates for {ticker}")
-    return pd.Series(
-        frame["adj_close"].to_numpy(dtype=float),
-        index=pd.DatetimeIndex(frame["date"]),
-        name=ticker,
-    ).sort_index()
+    return frame.loc[:, list(OHLCV_COLUMNS)]
 
+
+def _stored_row_invalid_reasons(row: pd.Series) -> list[str]:
+    """Return quality defects for a stored OHLCV observation, if any."""
+    reasons: list[str] = []
+    numeric: dict[str, float] = {}
+    for field in ("open", "high", "low", "close", "adj_close", "volume"):
+        try:
+            value = float(row.get(field))
+        except (TypeError, ValueError):
+            value = float("nan")
+        numeric[field] = value
+        if not np.isfinite(value):
+            reasons.append(f"missing_or_nonfinite_{field}")
+        elif field != "volume" and value <= 0:
+            reasons.append(f"nonpositive_{field}")
+        elif field == "volume" and value < 0:
+            reasons.append("negative_volume")
+
+    price_fields = ("open", "high", "low", "close")
+    if all(np.isfinite(numeric[field]) and numeric[field] > 0 for field in price_fields):
+        if numeric["high"] < max(numeric["open"], numeric["low"], numeric["close"]):
+            reasons.append("high_below_ohlc_max")
+        if numeric["low"] > min(numeric["open"], numeric["high"], numeric["close"]):
+            reasons.append("low_above_ohlc_min")
+    return reasons
+
+
+def _find_repair_dates(
+    yahoo_history: pd.DataFrame,
+    stored_rows: pd.DataFrame,
+    calendar: pd.DatetimeIndex,
+) -> list[tuple[pd.Timestamp, str, list[str]]]:
+    """Find Yahoo sessions with absent rows or invalid stored OHLCV observations."""
+    source = yahoo_history.reindex(calendar)
+    repair_dates: list[tuple[pd.Timestamp, str, list[str]]] = []
+    for date in source.index[source["adj_close"].notna()]:
+        date = pd.Timestamp(date)
+        if date not in stored_rows.index:
+            repair_dates.append((date, "insert", ["missing_supabase_row"]))
+            continue
+        reasons = _stored_row_invalid_reasons(stored_rows.loc[date])
+        if reasons:
+            repair_dates.append((date, "update_invalid", reasons))
+    return repair_dates
 
 def _calibrate_price_scale(
     stored_adj_close: pd.Series,
@@ -247,7 +288,7 @@ def _find_missing_sessions(
     return [pd.Timestamp(date) for date in expected_dates if date not in existing_dates]
 
 
-def _sql_number(value: float, decimals: int = 8) -> str:
+def _sql_number(value: float, decimals: int = 4) -> str:
     number = float(value)
     if not np.isfinite(number):
         raise ValueError("Cannot render a non-finite SQL numeric value")
@@ -255,48 +296,51 @@ def _sql_number(value: float, decimals: int = 8) -> str:
 
 
 def _render_repair_sql(rows: list[dict], batch_size: int = 200) -> str:
-    """Render one transaction of idempotent INSERTs for reviewed candidates."""
+    """Render an idempotent SQL repair, updating only still-invalid rows."""
     if not rows:
         return (
-            "-- No automatically repairable price gaps were found.\n"
+            "-- No automatically repairable price gaps or invalid rows were found.\n"
             "-- Review reports/alpha_price_coverage_audit before changing source data.\n"
         )
 
     statements = [
         "-- Generated by jobs.audit_alpha_price_coverage; review before execution.",
-        "-- Only absent (ticker, price_date) keys are inserted; existing rows are not overwritten.",
+        "-- Inserts missing keys and updates only rows still failing OHLCV validation.",
         "BEGIN;",
     ]
     columns = (
         "price_date", "ticker", '"open"', '"high"', '"low"',
         '"close"', "adj_close", "volume",
     )
-    cte_columns = "price_date, ticker, " + ', '.join(columns[2:])
+    cte_columns = "price_date, ticker, " + ", ".join(columns[2:])
     insert_columns = ", ".join(columns)
-    for offset in range(0, len(rows), batch_size):
-        batch = rows[offset : offset + batch_size]
-        values = []
-        for row in batch:
-            ticker = str(row["ticker"]).replace("'", "''")
-            volume = int(row["volume"])
-            values.append(
-                "("
-                f"DATE '{pd.Timestamp(row['price_date']).date().isoformat()}', "
-                f"'{ticker}', "
-                f"{_sql_number(row['open'])}, "
-                f"{_sql_number(row['high'])}, "
-                f"{_sql_number(row['low'])}, "
-                f"{_sql_number(row['close'])}, "
-                f"{_sql_number(row['adj_close'])}, "
-                f"{volume}"
-                ")"
-            )
+
+    def row_values(row: dict) -> str:
+        ticker = str(row["ticker"]).replace("'", "''")
+        return (
+            "("
+            f"DATE '{pd.Timestamp(row['price_date']).date().isoformat()}', "
+            f"'{ticker}', "
+            f"{_sql_number(row['open'])}, "
+            f"{_sql_number(row['high'])}, "
+            f"{_sql_number(row['low'])}, "
+            f"{_sql_number(row['close'])}, "
+            f"{_sql_number(row['adj_close'])}, "
+            f"{int(row['volume'])}"
+            ")"
+        )
+
+    insert_rows = [row for row in rows if row["action"] == "insert"]
+    update_rows = [row for row in rows if row["action"] == "update_invalid"]
+
+    for offset in range(0, len(insert_rows), batch_size):
+        batch = insert_rows[offset : offset + batch_size]
         statements.extend(
             [
                 "",
                 f"WITH proposed ({cte_columns}) AS (",
                 "    VALUES",
-                "        " + ",\n        ".join(values),
+                "        " + ",\n        ".join(row_values(row) for row in batch),
                 ")",
                 f"INSERT INTO public.stock_prices ({insert_columns})",
                 "SELECT p.price_date, p.ticker, p.\"open\", p.\"high\", p.\"low\",",
@@ -309,9 +353,37 @@ def _render_repair_sql(rows: list[dict], batch_size: int = 200) -> str:
                 ");",
             ]
         )
+
+    for offset in range(0, len(update_rows), batch_size):
+        batch = update_rows[offset : offset + batch_size]
+        statements.extend(
+            [
+                "",
+                f"WITH proposed ({cte_columns}) AS (",
+                "    VALUES",
+                "        " + ",\n        ".join(row_values(row) for row in batch),
+                ")",
+                "UPDATE public.stock_prices AS target",
+                'SET "open" = p."open", "high" = p."high", "low" = p."low",',
+                '    "close" = p."close", adj_close = p.adj_close, volume = p.volume',
+                "FROM proposed AS p",
+                "WHERE target.price_date = p.price_date",
+                "  AND target.ticker = p.ticker",
+                "  AND (",
+                '      target."open" IS NULL OR target."high" IS NULL',
+                '      OR target."low" IS NULL OR target."close" IS NULL',
+                "      OR target.adj_close IS NULL OR target.volume IS NULL",
+                '      OR target."open" <= 0 OR target."high" <= 0',
+                '      OR target."low" <= 0 OR target."close" <= 0',
+                "      OR target.adj_close <= 0 OR target.volume < 0",
+                '      OR target."high" < GREATEST(target."open", target."low", target."close")',
+                '      OR target."low" > LEAST(target."open", target."high", target."close")',
+                "  );",
+            ]
+        )
+
     statements.extend(["", "COMMIT;", ""])
     return "\n".join(statements)
-
 
 def audit_price_coverage(
     predictions_csv: Path,
@@ -364,6 +436,7 @@ def audit_price_coverage(
                 "yahoo_sessions": 0,
                 "supabase_sessions": 0,
                 "missing_sessions": 0,
+                "invalid_sessions": 0,
                 "repair_candidates": 0,
                 "calibration_observations": 0,
                 "scale_factor": None,
@@ -375,7 +448,7 @@ def audit_price_coverage(
             continue
 
         try:
-            stored = _fetch_supabase_adjusted(client, ticker, start)
+            stored = _fetch_supabase_prices(client, ticker, start)
         except Exception as exc:
             database_errors += 1
             summary_rows.append({
@@ -383,6 +456,7 @@ def audit_price_coverage(
                 "yahoo_sessions": int(yahoo_history["adj_close"].notna().sum()),
                 "supabase_sessions": 0,
                 "missing_sessions": 0,
+                "invalid_sessions": 0,
                 "repair_candidates": 0,
                 "calibration_observations": 0,
                 "scale_factor": None,
@@ -396,24 +470,32 @@ def audit_price_coverage(
         stored_window = stored.loc[stored.index.isin(calendar)]
         yahoo_sessions = int(yahoo_history["adj_close"].notna().sum())
         supabase_sessions = int(len(stored_window))
+        invalid_sessions = sum(
+            1 for _, stored_row in stored_window.iterrows()
+            if _stored_row_invalid_reasons(stored_row)
+        )
+
         if stored_window.empty:
             summary_rows.append({
                 "ticker": ticker,
                 "yahoo_sessions": yahoo_sessions,
                 "supabase_sessions": 0,
                 "missing_sessions": yahoo_sessions,
+                "invalid_sessions": 0,
                 "repair_candidates": 0,
                 "calibration_observations": 0,
                 "scale_factor": None,
                 "p95_relative_dispersion": None,
                 "status": "no_supabase_history",
-                "details": "No stored adjusted close in the audit window; no rows auto-approved.",
+                "details": "No stored history in the audit window; no rows auto-approved.",
             })
             for missing_date in yahoo_history.index[yahoo_history["adj_close"].notna()]:
                 gap_rows.append({
                     "ticker": ticker,
                     "date": missing_date.date().isoformat(),
+                    "action": "review",
                     "classification": "requires_review_no_supabase_history",
+                    "validation_reasons": "no_overlap_for_scale_calibration",
                     "yahoo_adj_close": float(yahoo_history.loc[missing_date, "adj_close"]),
                     "scale_factor": None,
                     "p95_relative_dispersion": None,
@@ -423,22 +505,27 @@ def audit_price_coverage(
             continue
 
         calibration = _calibrate_price_scale(
-            stored_window,
+            stored_window["adj_close"],
             yahoo_history["adj_close"],
             min_overlap=min_overlap,
             max_dispersion=max_scale_dispersion,
         )
-        missing_dates = _find_missing_sessions(yahoo_history, stored_window, calendar)
+        repair_dates = _find_repair_dates(yahoo_history, stored_window, calendar)
         scale_factor = calibration["scale_factor"]
         dispersion = calibration["p95_relative_dispersion"]
         calibrated = calibration["status"] == "calibrated"
         candidate_count = 0
+        missing_sessions = sum(action == "insert" for _, action, _ in repair_dates)
+        invalid_sessions_found = sum(
+            action == "update_invalid" for _, action, _ in repair_dates
+        )
 
-        for missing_date in missing_dates:
-            source_row = yahoo_history.loc[missing_date]
+        for repair_date, action, reasons in repair_dates:
+            source_row = yahoo_history.loc[repair_date]
             if calibrated:
                 row = {
-                    "price_date": missing_date.date().isoformat(),
+                    "action": action,
+                    "price_date": repair_date.date().isoformat(),
                     "ticker": ticker,
                     "open": float(source_row["open"]) * float(scale_factor),
                     "high": float(source_row["high"]) * float(scale_factor),
@@ -446,41 +533,54 @@ def audit_price_coverage(
                     "close": float(source_row["close"]) * float(scale_factor),
                     "adj_close": float(source_row["adj_close"]) * float(scale_factor),
                     "volume": int(source_row["volume"]),
+                    "repair_reason": ";".join(reasons),
                 }
                 repair_rows.append(row)
                 candidate_count += 1
-                classification = "repair_candidate"
-                details = "Yahoo adjusted OHLCV calibrated against overlapping Supabase adjusted closes."
+                classification = (
+                    "repair_candidate_missing_row"
+                    if action == "insert"
+                    else "repair_candidate_invalid_row"
+                )
+                details = (
+                    "Yahoo adjusted OHLCV calibrated against overlapping Supabase "
+                    "adjusted closes. SQL inserts absent keys or updates only rows "
+                    "that remain invalid."
+                )
             else:
                 classification = f"requires_review_{calibration['status']}"
                 details = (
                     "Not included in repair SQL because the price basis could not be "
                     "calibrated with sufficient stable overlap."
                 )
+                action = "review"
             gap_rows.append({
                 "ticker": ticker,
-                "date": missing_date.date().isoformat(),
+                "date": repair_date.date().isoformat(),
+                "action": action,
                 "classification": classification,
+                "validation_reasons": ";".join(reasons),
                 "yahoo_adj_close": float(source_row["adj_close"]),
                 "scale_factor": scale_factor,
                 "p95_relative_dispersion": dispersion,
                 "details": details,
             })
 
-        if not missing_dates:
+        if not repair_dates:
             status = "ok" if calibrated else calibration["status"]
-            details = "No Yahoo trading sessions were missing from Supabase in the audit window."
+            details = "No missing or invalid OHLCV observations on Yahoo sessions in the audit window."
         elif calibrated:
             status = "repairable_gaps"
-            details = "All identified gaps passed the adjusted-price basis consistency check."
+            details = "All identified gaps/invalid rows passed the adjusted-price basis consistency check."
         else:
             status = calibration["status"]
-            details = "Price gaps found, but not approved for automatic repair."
+            details = "Data defects found, but not approved for automatic repair."
         summary_rows.append({
             "ticker": ticker,
             "yahoo_sessions": yahoo_sessions,
             "supabase_sessions": supabase_sessions,
-            "missing_sessions": len(missing_dates),
+            "missing_sessions": missing_sessions,
+            "invalid_sessions": invalid_sessions_found,
             "repair_candidates": candidate_count,
             "calibration_observations": calibration["observations"],
             "scale_factor": scale_factor,
@@ -490,14 +590,16 @@ def audit_price_coverage(
         })
         print(
             f"[{position}/{len(tickers)}] {ticker}: "
-            f"{len(missing_dates)} missing, {candidate_count} repair candidate(s), "
-            f"status={status}"
+            f"{missing_sessions} missing row(s), {invalid_sessions_found} invalid row(s), "
+            f"{candidate_count} repair candidate(s), status={status}"
         )
-
     output_dir.mkdir(parents=True, exist_ok=True)
     summary = pd.DataFrame(summary_rows, columns=SUMMARY_COLUMNS)
     gaps = pd.DataFrame(gap_rows, columns=GAP_COLUMNS)
-    candidates = pd.DataFrame(repair_rows, columns=("price_date", "ticker", *OHLCV_COLUMNS))
+    candidates = pd.DataFrame(
+        repair_rows,
+        columns=("action", "price_date", "ticker", *OHLCV_COLUMNS, "repair_reason"),
+    )
     summary.to_csv(output_dir / "price_coverage_summary.csv", index=False)
     gaps.to_csv(output_dir / "price_coverage_gaps.csv", index=False)
     candidates.to_csv(output_dir / "price_repair_candidates.csv", index=False)
