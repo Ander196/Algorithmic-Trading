@@ -83,6 +83,58 @@ def fetch_intraday_history(
     )
 
 
+def fetch_unadjusted_daily_history(
+    ticker: str,
+    start: datetime,
+    end: datetime,
+) -> pd.DataFrame:
+    """Fetch daily Close and Adj Close needed to reconcile intraday price basis."""
+    return yf.Ticker(ticker).history(
+        start=start,
+        end=end,
+        auto_adjust=False,
+        actions=False,
+        repair=False,
+    )
+
+
+def intraday_adjustment_factor(history: pd.DataFrame | None, session_date: str) -> float:
+    """Return the session's Adj Close / Close factor, or fail closed.
+
+    Intraday bars are fetched unadjusted. The repository stores auto-adjusted
+    OHLC, so their extrema must be multiplied by the same-session factor.
+    """
+    if history is None or history.empty:
+        raise ValueError("daily adjustment history is missing")
+
+    frame = _normalize_columns(history)
+    if not {"close", "adj_close"}.issubset(frame.columns):
+        raise ValueError("daily adjustment history must include Close and Adj Close")
+
+    dates = pd.to_datetime(frame.index, errors="coerce").strftime("%Y-%m-%d")
+    session_rows = frame.loc[dates == session_date]
+    if len(session_rows) != 1:
+        raise ValueError(
+            f"expected exactly one daily adjustment row for {session_date}, "
+            f"found {len(session_rows)}"
+        )
+
+    raw_close = pd.to_numeric(session_rows.iloc[0]["close"], errors="coerce")
+    adjusted_close = pd.to_numeric(session_rows.iloc[0]["adj_close"], errors="coerce")
+    if (
+        not np.isfinite(raw_close)
+        or not np.isfinite(adjusted_close)
+        or raw_close <= 0
+        or adjusted_close <= 0
+    ):
+        raise ValueError("daily Close/Adj Close values are missing or invalid")
+
+    factor = float(adjusted_close / raw_close)
+    if not np.isfinite(factor) or factor <= 0:
+        raise ValueError("daily adjustment factor is invalid")
+    return factor
+
+
 def _normalize_columns(history: pd.DataFrame) -> pd.DataFrame:
     frame = history.copy()
     if isinstance(frame.columns, pd.MultiIndex):
@@ -301,6 +353,7 @@ def repair_candidates(
     *,
     mode: str = "provider-daily",
     fetcher: Callable[[str, datetime, datetime], pd.DataFrame] | None = None,
+    adjustment_fetcher: Callable[[str, datetime, datetime], pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """Build a read-only repair proposal from audit rows and fresh provider data.
 
@@ -318,6 +371,8 @@ def repair_candidates(
             fetch_intraday_history if mode == "intraday-high-low"
             else fetch_adjusted_history
         )
+    if adjustment_fetcher is None:
+        adjustment_fetcher = fetch_unadjusted_daily_history
     reports: list[dict] = []
 
     for ticker, group in frame.groupby("ticker", sort=True):
@@ -378,6 +433,21 @@ def repair_candidates(
 
                 normalized = normalize_intraday_history(intraday)
                 try:
+                    daily_adjustment_history = adjustment_fetcher(
+                        ticker, session_start, session_end
+                    )
+                    adjustment_factor = intraday_adjustment_factor(
+                        daily_adjustment_history, date
+                    )
+                except Exception as exc:
+                    reports.append(_set_error(
+                        report,
+                        "adjustment_factor_unavailable",
+                        f"Cannot verify same-session Adj Close / Close factor: {exc}",
+                    ))
+                    continue
+
+                try:
                     open_price = float(original["open"])
                     close_price = float(original["close"])
                     original_adj_close = float(original["adj_close"])
@@ -388,8 +458,12 @@ def repair_candidates(
                     ))
                     continue
 
-                candidate_high = max(float(normalized["high"].max()), open_price, close_price)
-                candidate_low = min(float(normalized["low"].min()), open_price, close_price)
+                # Convert raw intraday extrema to the adjusted OHLC basis used
+                # by stock_prices. Preserve the stored adjusted open/close.
+                adjusted_highs = normalized["high"] * adjustment_factor
+                adjusted_lows = normalized["low"] * adjustment_factor
+                candidate_high = max(float(adjusted_highs.max()), open_price, close_price)
+                candidate_low = min(float(adjusted_lows.min()), open_price, close_price)
                 final_bar = {
                     "open": open_price,
                     "high": candidate_high,
@@ -414,8 +488,10 @@ def repair_candidates(
                 report["intraday_last_bar"] = normalized.index[-1].isoformat()
                 report["intraday_volume"] = int(normalized["volume"].sum())
                 report["repair_error"] = (
-                    "Candidate uses intraday extrema; daily open, close, adj_close "
-                    "and volume are preserved. Independent source verification is still advised."
+                    f"Intraday extrema converted to adjusted basis with same-session "
+                    f"Adj Close / Close factor {adjustment_factor:.12g}; daily open, "
+                    "close, adj_close and volume are preserved. Independent source "
+                    "verification is still advised."
                 )
                 reports.append(report)
                 continue
