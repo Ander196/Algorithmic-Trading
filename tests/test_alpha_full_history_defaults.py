@@ -22,10 +22,13 @@ def test_alpha_cli_defaults_to_unlimited_history_but_keeps_explicit_cap(
 ) -> None:
     captured = {}
 
-    def fake_evaluate_alpha(client, market_ticker, history_limit, max_tickers):
+    def fake_evaluate_alpha(
+        client, market_ticker, history_limit, max_tickers, evaluation_end_date
+    ):
         captured["market_ticker"] = market_ticker
         captured["history_limit"] = history_limit
         captured["max_tickers"] = max_tickers
+        captured["evaluation_end_date"] = evaluation_end_date
         return (
             SimpleNamespace(
                 fold_count=0,
@@ -47,3 +50,4 @@ def test_alpha_cli_defaults_to_unlimited_history_but_keeps_explicit_cap(
     evaluate_alpha_job.main()
 
     assert captured["history_limit"] == expected_limit
+    assert captured["evaluation_end_date"] is None
