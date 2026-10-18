@@ -81,6 +81,7 @@ class FoldMetrics:
     ic_positive_fraction: float
     mean_cross_section: float
     top_n_metrics: tuple[TopNMetrics, ...]
+    ic_dates: int = 0
 
 
 @dataclass(frozen=True)
@@ -95,8 +96,17 @@ class AlphaEvaluationReport:
     def fold_count(self) -> int:
         return len(self.folds)
 
+    @staticmethod
+    def _weighted_mean(values: list[float], weights: list[int]) -> float:
+        value_array = np.asarray(values, dtype=float)
+        weight_array = np.asarray(weights, dtype=float)
+        valid = np.isfinite(value_array) & np.isfinite(weight_array) & (weight_array > 0)
+        if not valid.any():
+            return float("nan")
+        return float(np.average(value_array[valid], weights=weight_array[valid]))
+
     def aggregate_top_n(self, top_n: int) -> TopNMetrics:
-        """Aggregate one Top-N configuration across folds."""
+        """Aggregate Top-N metrics weighted by the count of valid OOS dates."""
         metrics = [
             metric
             for fold in self.folds
@@ -106,29 +116,34 @@ class AlphaEvaluationReport:
         if not metrics:
             raise ValueError(f"No evaluation metrics available for top_n={top_n}")
 
+        weights = [metric.valid_dates for metric in metrics]
         return TopNMetrics(
             top_n=top_n,
-            mean_excess_return=float(
-                np.mean([metric.mean_excess_return for metric in metrics])
+            mean_excess_return=self._weighted_mean(
+                [metric.mean_excess_return for metric in metrics], weights
             ),
-            mean_universe_excess_return=float(
-                np.mean([metric.mean_universe_excess_return for metric in metrics])
+            mean_universe_excess_return=self._weighted_mean(
+                [metric.mean_universe_excess_return for metric in metrics], weights
             ),
-            mean_top_vs_universe_spread=float(
-                np.mean([metric.mean_top_vs_universe_spread for metric in metrics])
+            mean_top_vs_universe_spread=self._weighted_mean(
+                [metric.mean_top_vs_universe_spread for metric in metrics], weights
             ),
-            mean_top_vs_bottom_spread=float(
-                np.mean([metric.mean_top_vs_bottom_spread for metric in metrics])
+            mean_top_vs_bottom_spread=self._weighted_mean(
+                [metric.mean_top_vs_bottom_spread for metric in metrics], weights
             ),
-            mean_hit_rate=float(
-                np.mean([metric.mean_hit_rate for metric in metrics])
+            mean_hit_rate=self._weighted_mean(
+                [metric.mean_hit_rate for metric in metrics], weights
             ),
             valid_dates=sum(metric.valid_dates for metric in metrics),
         )
 
     @property
     def mean_ic(self) -> float:
-        return float(np.mean([fold.mean_ic for fold in self.folds]))
+        weights = [
+            fold.ic_dates if fold.ic_dates > 0 else fold.valid_dates
+            for fold in self.folds
+        ]
+        return self._weighted_mean([fold.mean_ic for fold in self.folds], weights)
 
     @property
     def median_ic(self) -> float:
@@ -136,8 +151,12 @@ class AlphaEvaluationReport:
 
     @property
     def ic_positive_fraction(self) -> float:
-        return float(
-            np.mean([fold.ic_positive_fraction for fold in self.folds])
+        weights = [
+            fold.ic_dates if fold.ic_dates > 0 else fold.valid_dates
+            for fold in self.folds
+        ]
+        return self._weighted_mean(
+            [fold.ic_positive_fraction for fold in self.folds], weights
         )
 
 
@@ -297,6 +316,7 @@ class AlphaEvaluator:
             else float("nan"),
             mean_cross_section=float(np.mean(daily_cross_sections)),
             top_n_metrics=fold_top_metrics,
+            ic_dates=len(daily_ics),
         )
 
     @staticmethod

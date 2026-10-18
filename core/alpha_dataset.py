@@ -19,6 +19,8 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
+from data.excluded_tickers import is_excluded_ticker, normalize_ticker
+
 
 DEFAULT_FEATURE_COLUMNS: tuple[str, ...] = (
     "return_5", "return_10", "return_20", "return_60",
@@ -67,6 +69,9 @@ class AlphaDatasetBuilder:
         for ticker, raw_data in stock_data.items():
             if not ticker:
                 raise ValueError("ticker names must not be empty")
+            ticker = normalize_ticker(ticker)
+            if is_excluded_ticker(ticker):
+                continue
             stock = self._prepare_frame(raw_data, ticker)
             if len(stock) < self.config.min_history + self.config.horizon_days:
                 continue

@@ -22,6 +22,7 @@ class WalkForwardConfig:
     step_period: int = 126
     horizon_days: int = 5
     min_train_rows: int = 500
+    include_partial_test_fold: bool = False
 
     def __post_init__(self) -> None:
         for name in ("train_period", "test_period", "step_period", "horizon_days"):
@@ -52,19 +53,26 @@ class WalkForwardProtocol:
     def split(self, dataset: pd.DataFrame) -> Iterator[WalkForwardFold]:
         dates = self._unique_dates(dataset)
         required_dates = self.config.train_period + self.config.test_period
-        if len(dates) < required_dates:
+        if not self.config.include_partial_test_fold and len(dates) < required_dates:
+            return
+        if len(dates) < self.config.train_period + 1:
             return
 
         start = 0
         fold_id = 0
 
-        while start + required_dates <= len(dates):
+        while start + self.config.train_period < len(dates):
             train_start = dates[start]
             train_end = dates[start + self.config.train_period - 1]
             test_start = dates[start + self.config.train_period]
-            test_end = dates[
+            requested_test_end_pos = (
                 start + self.config.train_period + self.config.test_period - 1
-            ]
+            )
+            test_end_pos = min(requested_test_end_pos, len(dates) - 1)
+            is_partial_test_fold = test_end_pos < requested_test_end_pos
+            if is_partial_test_fold and not self.config.include_partial_test_fold:
+                break
+            test_end = dates[test_end_pos]
 
             # Purge labels whose future endpoint reaches the OOS boundary.
             label_end = pd.to_datetime(dataset["label_end_date"])

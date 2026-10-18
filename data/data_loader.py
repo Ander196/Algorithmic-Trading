@@ -79,7 +79,17 @@ def fetchPriceData(
     for attempt in range(retries):
         try:
             stock = yf.Ticker(ticker)
-            df = stock.history(start=startDate, end=endDate)
+            # Request the total-return-adjusted OHLC basis explicitly. Older
+            # rows were ingested using yfinance's version-dependent default;
+            # in this project's current environment that default adjusted OHLC.
+            # Keeping this explicit avoids storing a raw-price tail in an
+            # otherwise adjusted historical series.
+            df = stock.history(
+                start=startDate,
+                end=endDate,
+                auto_adjust=True,
+                actions=False,
+            )
 
             if df.empty:
                 return None
@@ -111,11 +121,9 @@ def fetchPriceData(
             df["price_date"] = df.index.strftime("%Y-%m-%d")
             df = df.reset_index(drop=True)
 
-            try:
-                adj_close = stock.info.get("adj_close") or stock.info.get("adjClose")
-                df["adj_close"] = adj_close if adj_close is not None else df["close"]
-            except Exception:
-                df["adj_close"] = df["close"]
+            # With auto_adjust=True, OHLC already includes corporate-action
+            # adjustments. Keep adj_close on that same basis.
+            df["adj_close"] = df["close"]
 
             return validate_ohlcv_frame(df, ticker)
 

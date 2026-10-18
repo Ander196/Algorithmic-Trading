@@ -36,7 +36,7 @@ US_TICKERS = [
     "ZS", "PLTR", "SNOW", "DDOG", "HUBS", "MDB", "TEAM", "WDAY", "OKTA", "SPLK",
     "NXPI", "ON", "MPWR", "ADI", "MCHP", "XEL", "CTAS", "CDW", "MNST", "KDP",
     "GFS", "AS", "CPRT", "PAYC", "CDNS", "ANSS", "PTC", "SWKS", "QRVO", "KEYS",
-    "TER", "VEON", "LBTYK", "WBD", "FOX", "DIS", "CMCSA", "CHTR", "T", "VZ",
+    "TER", "VEON", "LBTYK", "FOX", "DIS", "CMCSA", "CHTR", "T", "VZ",
     # Consumer/Retail
     "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "AXP",
     "COST", "WMT", "HD", "MCD", "NKE", "SBUX", "TGT", "LOW", "DG", "DLTR",
