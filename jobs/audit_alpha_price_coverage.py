@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from data.excluded_tickers import filter_excluded_ticker_rows, is_excluded_ticker
 from jobs.common import get_supabase_client
 from jobs.export_alpha_adjusted_prices import _select_backtest_calendar
 
@@ -60,6 +61,14 @@ def _read_predictions(path: Path) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[
     rows["ticker"] = rows["ticker"].astype(str).str.strip().str.upper()
     if (rows["ticker"] == "").any():
         raise ValueError("predictions CSV contains empty ticker values")
+    rows, excluded_tickers = filter_excluded_ticker_rows(rows)
+    if excluded_tickers:
+        print(
+            "Excluding retired/invalid tickers from coverage audit: "
+            + ", ".join(excluded_tickers)
+        )
+    if rows.empty:
+        raise ValueError("predictions contain no eligible tickers after exclusions")
     if rows.duplicated(["date", "ticker"]).any():
         raise ValueError("predictions CSV contains duplicate date/ticker rows")
     signal_dates = pd.DatetimeIndex(sorted(rows["date"].unique()))
@@ -411,6 +420,8 @@ def audit_price_coverage(
 
     _, signal_dates, prediction_tickers = _read_predictions(predictions_csv)
     benchmark_ticker = benchmark_ticker.strip().upper()
+    if is_excluded_ticker(benchmark_ticker):
+        raise ValueError(f"benchmark ticker {benchmark_ticker!r} is excluded")
     tickers = sorted(set(prediction_tickers) | {benchmark_ticker})
     # Fetch ample calendar context, then keep exactly the window required by
     # the backtest (lookback sessions before the first signal and two after the last).
