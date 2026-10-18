@@ -1,6 +1,7 @@
 """Shared data-access helpers for scheduled jobs."""
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -10,6 +11,8 @@ from supabase import Client, create_client
 
 from data.excluded_tickers import is_excluded_ticker, normalize_ticker
 from data.price_validation import validate_ohlcv_frame
+
+logger = logging.getLogger(__name__)
 
 
 def get_supabase_client() -> Client:
