@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ssl
+import time
 from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
@@ -79,7 +80,7 @@ def _fetch_adjusted(client, ticker: str, start: str) -> pd.Series:
     return pd.Series(frame["adj_close"].to_numpy(), index=pd.DatetimeIndex(frame["date"]), name=ticker).sort_index()
 
 
-def _fetch_eur_usd_reference(start: str, end: str) -> pd.Series:
+def _fetch_eur_usd_reference_chunk(start: str, end: str) -> pd.Series:
     """Fetch daily USD-per-EUR reference rates from the ECB Data Portal.
 
     A dedicated truststore SSLContext uses the operating system certificate
@@ -105,13 +106,21 @@ def _fetch_eur_usd_reference(start: str, end: str) -> pd.Series:
         },
     )
     context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    try:
-        with urlopen(request, context=context, timeout=30) as response:
-            payload = response.read()
-    except (OSError, TimeoutError) as exc:
-        raise RuntimeError(
-            f"Could not download ECB EUR/USD reference rates for {start} to {end}: {exc}"
-        ) from exc
+    # Retry transient read timeouts for this bounded date chunk. Certificate and
+    # other non-timeout failures are surfaced immediately rather than retried.
+    for attempt in range(3):
+        try:
+            with urlopen(request, context=context, timeout=30) as response:
+                payload = response.read()
+            break
+        except (OSError, TimeoutError) as exc:
+            is_timeout = isinstance(exc, TimeoutError) or "timed out" in str(exc).lower()
+            if is_timeout and attempt < 2:
+                time.sleep(attempt + 1)
+                continue
+            raise RuntimeError(
+                f"Could not download ECB EUR/USD reference rates for {start} to {end}: {exc}"
+            ) from exc
 
     try:
         frame = pd.read_csv(BytesIO(payload))
@@ -164,6 +173,44 @@ def _fetch_eur_usd_reference(start: str, end: str) -> pd.Series:
         name="EUR",
     ).sort_index()
 
+
+
+def _fetch_eur_usd_reference(start: str, end: str) -> pd.Series:
+    """Fetch ECB EUR/USD reference rates in calendar-year chunks.
+
+    The ECB endpoint can time out on multi-decade requests. Annual chunks keep
+    each response bounded; only transient read timeouts are retried by the
+    chunk downloader. No TLS verification is disabled and no observations are
+    synthesized or forward-filled here.
+    """
+    start_date = pd.Timestamp(start).normalize()
+    end_date = pd.Timestamp(end).normalize()
+    if start_date > end_date:
+        raise ValueError(f"ECB EUR/USD start date {start} is after end date {end}")
+
+    chunks: list[pd.Series] = []
+    chunk_start = start_date
+    while chunk_start <= end_date:
+        year_end = pd.Timestamp(year=chunk_start.year, month=12, day=31)
+        chunk_end = min(end_date, year_end)
+        chunks.append(
+            _fetch_eur_usd_reference_chunk(
+                chunk_start.strftime("%Y-%m-%d"),
+                chunk_end.strftime("%Y-%m-%d"),
+            )
+        )
+        chunk_start = chunk_end + timedelta(days=1)
+
+    rates = pd.concat(chunks).sort_index()
+    if rates.index.has_duplicates:
+        raise ValueError("ECB EUR/USD series contains duplicate observation dates across chunks")
+    rates = rates.loc[rates.index.to_series().between(start_date, end_date).to_numpy()]
+    if rates.empty:
+        raise RuntimeError(
+            f"ECB returned no valid EUR/USD reference rates for {start} to {end}"
+        )
+    rates.name = "EUR"
+    return rates
 
 def _fx_usd_per_unit(currency: str, start: str, end: str) -> pd.Series:
     """Return USD per unit of currency using the ECB for EUR and Yahoo otherwise."""
