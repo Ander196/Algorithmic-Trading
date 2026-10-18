@@ -148,9 +148,9 @@ python -m jobs.backtest_alpha_portfolios --predictions-csv reports/alpha_diagnos
 
 The price export leaves dates before the first valid FX quote missing rather than
 backfilling with future exchange rates. Prolonged internal FX coverage gaps
-still fail validation. It reads Supabase but does not modify database records.
-The export converts prices to USD, but does not correct any non-USD mismatch in
-Alpha's training labels; that remains a research limitation.
+remain missing in the export, and the Alpha evaluation stops if a prolonged
+internal/trailing FX gap would distort its five-session training labels. Both
+jobs read Supabase without modifying database records.
 
 
 ### FX data gaps
