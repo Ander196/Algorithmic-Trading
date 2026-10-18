@@ -203,6 +203,63 @@ def test_eur_fx_uses_ecb_csv_and_system_truststore(monkeypatch) -> None:
     assert timeout == 30
     assert request.get_header("Accept") == "text/csv"
 
+def test_eur_fx_splits_long_history_into_calendar_year_chunks(monkeypatch) -> None:
+    requested = []
+    rows_by_start = {
+        "2003-10-01": "2003-10-02,1.1700",
+        "2004-01-01": "2004-06-01,1.2200",
+        "2005-01-01": "2005-04-15,1.2900",
+    }
+
+    def fake_urlopen(request, *, context, timeout):
+        query = parse_qs(urlparse(request.full_url).query)
+        start = query["startPeriod"][0]
+        requested.append((start, query["endPeriod"][0], context, timeout))
+        return BytesIO(_ecb_csv(rows_by_start[start]))
+
+    monkeypatch.setattr(export_job, "urlopen", fake_urlopen)
+    marker_context = object()
+    monkeypatch.setattr(
+        export_job.truststore,
+        "SSLContext",
+        lambda protocol: marker_context,
+    )
+
+    result = _fetch_eur_usd_reference("2003-10-01", "2005-04-30")
+
+    assert [(start, end) for start, end, _, _ in requested] == [
+        ("2003-10-01", "2003-12-31"),
+        ("2004-01-01", "2004-12-31"),
+        ("2005-01-01", "2005-04-30"),
+    ]
+    assert all(context is marker_context and timeout == 30 for _, _, context, timeout in requested)
+    assert result.index.tolist() == [
+        pd.Timestamp("2003-10-02"),
+        pd.Timestamp("2004-06-01"),
+        pd.Timestamp("2005-04-15"),
+    ]
+    assert result.tolist() == pytest.approx([1.17, 1.22, 1.29])
+
+
+def test_eur_fx_retries_transient_read_timeout(monkeypatch) -> None:
+    calls = []
+    payload = _ecb_csv("2008-08-13,1.4903")
+
+    def fake_urlopen(request, *, context, timeout):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise TimeoutError("The read operation timed out")
+        return BytesIO(payload)
+
+    monkeypatch.setattr(export_job, "urlopen", fake_urlopen)
+    monkeypatch.setattr(export_job.time, "sleep", lambda _seconds: None)
+
+    result = _fetch_eur_usd_reference("2008-08-01", "2008-08-31")
+
+    assert len(calls) == 2
+    assert result.tolist() == pytest.approx([1.4903])
+
+
 def test_eur_fx_rejects_unexpected_currency_dimensions(monkeypatch) -> None:
     monkeypatch.setattr(
         export_job,
