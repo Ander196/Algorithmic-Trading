@@ -305,7 +305,9 @@ def _sql_number(value: float, decimals: int = 4) -> str:
 
 def _render_repair_sql(rows: list[dict], batch_size: int = 200) -> str:
     """Render an idempotent SQL repair, updating only still-invalid rows."""
-    if not rows:
+    insert_rows = [row for row in rows if row.get("action") == "insert"]
+    update_rows = [row for row in rows if row.get("action") == "update_invalid"]
+    if not insert_rows and not update_rows:
         return (
             "-- No automatically repairable price gaps or invalid rows were found.\n"
             "-- Review reports/alpha_price_coverage_audit before changing source data.\n"
@@ -337,9 +339,6 @@ def _render_repair_sql(rows: list[dict], batch_size: int = 200) -> str:
             f"{int(row['volume'])}"
             ")"
         )
-
-    insert_rows = [row for row in rows if row["action"] == "insert"]
-    update_rows = [row for row in rows if row["action"] == "update_invalid"]
 
     for offset in range(0, len(insert_rows), batch_size):
         batch = insert_rows[offset : offset + batch_size]
