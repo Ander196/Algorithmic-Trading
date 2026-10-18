@@ -129,6 +129,34 @@ def test_convert_stock_histories_to_usd_aligns_fx_without_lookahead(monkeypatch)
     assert usd_history["volume"].tolist() == [1100.0, 1200.0]
 
 
+def test_convert_stock_histories_to_usd_rejects_internal_fx_gap(monkeypatch) -> None:
+    dates = pd.bdate_range("2024-01-02", periods=8)
+    local_history = pd.DataFrame(
+        {
+            "open": [100.0] * 8,
+            "high": [105.0] * 8,
+            "low": [98.0] * 8,
+            "close": [102.0] * 8,
+            "volume": [1000.0] * 8,
+        },
+        index=dates,
+    )
+    fx_series = pd.Series(
+        [1.1, 1.2],
+        index=pd.DatetimeIndex([dates[0], dates[7]]),
+        name="EUR",
+    )
+    market = pd.DataFrame({"close": [100.0] * 8}, index=dates)
+    monkeypatch.setattr(
+        evaluate_alpha_module,
+        "_fx_usd_per_unit",
+        lambda currency, start, end: fx_series,
+    )
+
+    with pytest.raises(ValueError, match="internal/trailing EUR/USD FX gap"):
+        _convert_stock_histories_to_usd({"AAA.DE": local_history}, market)
+
+
 def test_to_ohlcv_frame_rejects_missing_columns() -> None:
     raw = pd.DataFrame(
         {
