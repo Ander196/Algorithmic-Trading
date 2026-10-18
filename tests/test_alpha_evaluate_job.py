@@ -4,6 +4,7 @@ import pytest
 from core.alpha_evaluation import AlphaEvaluationReport
 from jobs.evaluate_alpha import (
     _convert_stock_histories_to_usd,
+    _filter_dataset_by_evaluation_end_date,
     _print_diagnostics,
     _to_ohlcv_frame,
     get_alpha_universe,
@@ -31,6 +32,41 @@ class _FakeClient:
 
     def table(self, _name):
         return _FakeQuery(self.rows)
+
+
+def test_evaluation_end_date_filters_signal_dates_only() -> None:
+    dates = pd.to_datetime(["2026-07-20", "2026-07-21", "2026-07-22"])
+    index = pd.MultiIndex.from_arrays(
+        [dates, ["AAA", "AAA", "AAA"]],
+        names=["date", "ticker"],
+    )
+    dataset = pd.DataFrame(
+        {
+            "feature": [1.0, 2.0, 3.0],
+            "target_excess_return": [0.01, 0.02, 0.03],
+            # Outcomes may mature after the last signal date; they're scored
+            # out-of-sample and do not participate in that fold's fit.
+            "label_end_date": pd.to_datetime(["2026-07-27", "2026-07-28", "2026-07-29"]),
+        },
+        index=index,
+    )
+
+    filtered = _filter_dataset_by_evaluation_end_date(dataset, "2026-07-21")
+
+    assert filtered.index.get_level_values("date").max() == pd.Timestamp("2026-07-21")
+    assert filtered["label_end_date"].max() == pd.Timestamp("2026-07-28")
+
+
+def test_evaluation_end_date_rejects_cutoff_before_dataset() -> None:
+    dates = pd.to_datetime(["2026-07-20", "2026-07-21"])
+    index = pd.MultiIndex.from_arrays(
+        [dates, ["AAA", "AAA"]],
+        names=["date", "ticker"],
+    )
+    dataset = pd.DataFrame({"target_excess_return": [0.01, 0.02]}, index=index)
+
+    with pytest.raises(ValueError, match="No Alpha dataset rows are available"):
+        _filter_dataset_by_evaluation_end_date(dataset, "2020-01-01")
 
 
 def test_get_alpha_universe_uses_active_tickers_and_excludes_market() -> None:
