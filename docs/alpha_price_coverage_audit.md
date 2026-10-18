@@ -25,3 +25,9 @@ Review the reports before copying \`price_repair.sql\` into Supabase SQL Editor.
 The source uses Yahoo's adjusted-close factor to adjust OHLC consistently, then applies a constant per-ticker scale calibrated against overlapping Supabase adjusted closes. Tickers with insufficient overlap or inconsistent price basis are marked for review and excluded from the automatic SQL.
 
 The audit evaluates dates in the SPY-session panel used by the backtest. A foreign market holiday is not treated as a missing database row when Yahoo has no bar for that date. The separate exporter still handles bounded local-price and FX alignment. Review any nonzero provider errors or manual-review rows before applying repairs or interpreting backtest metrics.
+
+## FX handling in the price exporter
+
+The portfolio price exporter uses the ECB daily reference series `EXR.D.USD.EUR.SP00.A` for EUR-denominated listings, consistently across the requested history. Other supported foreign currencies continue to use the configured Yahoo Finance FX symbols. EUR/USD requests use the operating system certificate store through `truststore`; TLS verification remains enabled.
+
+ECB reference rates are daily reference observations, not intraday executable FX quotes. The exporter aligns them to the SPY session calendar and only forward-fills within the configured stale-session limit; it never backfills from a future quote. An extended or leading FX gap remains missing and can make a selected holding's next-session return unavailable. Re-export the price CSV after this source change before running the backtest; do not combine old Yahoo-EUR/USD exports with new ECB-converted prices.
