@@ -25,6 +25,7 @@ SUMMARY_COLUMNS = (
     "supabase_sessions",
     "missing_sessions",
     "invalid_sessions",
+    "source_invalid_sessions",
     "repair_candidates",
     "calibration_observations",
     "scale_factor",
@@ -220,6 +221,12 @@ def _find_repair_dates(
     repair_dates: list[tuple[pd.Timestamp, str, list[str]]] = []
     for date in source.index[source["adj_close"].notna()]:
         date = pd.Timestamp(date)
+        source_reasons = _stored_row_invalid_reasons(source.loc[date])
+        if source_reasons:
+            repair_dates.append(
+                (date, "review_source_invalid", [f"yahoo_source_{reason}" for reason in source_reasons])
+            )
+            continue
         if date not in stored_rows.index:
             repair_dates.append((date, "insert", ["missing_supabase_row"]))
             continue
@@ -439,6 +446,7 @@ def audit_price_coverage(
                 "supabase_sessions": 0,
                 "missing_sessions": 0,
                 "invalid_sessions": 0,
+                "source_invalid_sessions": 0,
                 "repair_candidates": 0,
                 "calibration_observations": 0,
                 "scale_factor": None,
@@ -459,6 +467,7 @@ def audit_price_coverage(
                 "supabase_sessions": 0,
                 "missing_sessions": 0,
                 "invalid_sessions": 0,
+                "source_invalid_sessions": 0,
                 "repair_candidates": 0,
                 "calibration_observations": 0,
                 "scale_factor": None,
@@ -480,6 +489,7 @@ def audit_price_coverage(
                 "supabase_sessions": 0,
                 "missing_sessions": yahoo_sessions,
                 "invalid_sessions": 0,
+                "source_invalid_sessions": 0,
                 "repair_candidates": 0,
                 "calibration_observations": 0,
                 "scale_factor": None,
@@ -517,10 +527,19 @@ def audit_price_coverage(
         invalid_sessions_found = sum(
             action == "update_invalid" for _, action, _ in repair_dates
         )
+        source_invalid_sessions = sum(
+            action == "review_source_invalid" for _, action, _ in repair_dates
+        )
 
         for repair_date, action, reasons in repair_dates:
             source_row = yahoo_history.loc[repair_date]
-            if calibrated:
+            if action == "review_source_invalid":
+                classification = "requires_review_invalid_yahoo_ohlcv"
+                details = (
+                    "Yahoo source OHLCV failed validity checks; excluded from repair SQL."
+                )
+                report_action = "review"
+            elif calibrated:
                 row = {
                     "action": action,
                     "price_date": repair_date.date().isoformat(),
@@ -545,17 +564,18 @@ def audit_price_coverage(
                     "adjusted closes. SQL inserts absent keys or updates only rows "
                     "that remain invalid."
                 )
+                report_action = action
             else:
                 classification = f"requires_review_{calibration['status']}"
                 details = (
                     "Not included in repair SQL because the price basis could not be "
                     "calibrated with sufficient stable overlap."
                 )
-                action = "review"
+                report_action = "review"
             gap_rows.append({
                 "ticker": ticker,
                 "date": repair_date.date().isoformat(),
-                "action": action,
+                "action": report_action,
                 "classification": classification,
                 "validation_reasons": ";".join(reasons),
                 "yahoo_adj_close": float(source_row["adj_close"]),
@@ -579,6 +599,7 @@ def audit_price_coverage(
             "supabase_sessions": supabase_sessions,
             "missing_sessions": missing_sessions,
             "invalid_sessions": invalid_sessions_found,
+            "source_invalid_sessions": source_invalid_sessions,
             "repair_candidates": candidate_count,
             "calibration_observations": calibration["observations"],
             "scale_factor": scale_factor,
