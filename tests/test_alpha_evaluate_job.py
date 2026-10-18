@@ -8,7 +8,7 @@ from jobs.evaluate_alpha import (
     _to_ohlcv_frame,
     get_alpha_universe,
 )
-from jobs import evaluate_alpha as evaluate_alpha_module
+import jobs.evaluate_alpha as evaluate_alpha_module
 
 
 class _FakeQuery:
