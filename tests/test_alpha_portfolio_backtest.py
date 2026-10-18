@@ -128,6 +128,21 @@ def test_configuration_rejects_invalid_values(kwargs, match) -> None:
         PortfolioBacktestConfig(**kwargs)
 
 
+def test_backtest_excludes_wbd_even_if_present_in_prediction_csv() -> None:
+    prices = _prices()
+    predictions = _predictions(prices)
+    extra = predictions.reset_index()[["date"]].drop_duplicates().copy()
+    extra["ticker"] = "WBD"
+    extra["expected_excess_return"] = 1000.0
+    extra = extra.set_index(["date", "ticker"])
+    predictions = pd.concat([predictions, extra]).sort_index()
+    prices["WBD"] = 10.0
+
+    report = run_alpha_portfolio_backtest(predictions, prices)
+
+    assert "WBD" not in set(report.holdings["ticker"])
+
+
 def test_backtest_rejects_duplicate_prediction_keys() -> None:
     prices = _prices()
     predictions = _predictions(prices)
