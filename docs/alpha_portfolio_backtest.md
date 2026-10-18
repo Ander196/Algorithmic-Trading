@@ -126,11 +126,14 @@ conclusion about Alpha's incremental economic value.
 
 ## Preparing the input files
 
-Run the OOS evaluation and save its diagnostics:
+Run the OOS evaluation and save its diagnostics. To compare the same currency-adjusted pipeline through a historical signal-date cutoff and the latest available data, use separate output directories:
 
 ```powershell
-python -m jobs.evaluate_alpha --diagnostics-dir reports/alpha_diagnostics
+python -m jobs.evaluate_alpha --evaluation-end-date 2026-07-20 --diagnostics-dir reports/alpha_diagnostics_20260720_usd
+python -m jobs.evaluate_alpha --diagnostics-dir reports/alpha_diagnostics_20261018_usd
 ```
+
+The cutoff filters OOS signal dates, not realized label endpoints: five-session target returns may mature after the last signal date, as required for out-of-sample scoring. The two reports use the same point-in-time fold logic; the second adds the latest partial fold and later data.
 
 Then export adjusted close prices from Supabase and convert supported foreign
 listings to USD using historical FX closes:
