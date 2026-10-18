@@ -587,9 +587,15 @@ def audit_price_coverage(
         if not repair_dates:
             status = "ok" if calibrated else calibration["status"]
             details = "No missing or invalid OHLCV observations on Yahoo sessions in the audit window."
-        elif calibrated:
+        elif calibrated and candidate_count and source_invalid_sessions:
+            status = "repairable_gaps_with_review"
+            details = "Some gaps are repair candidates; invalid Yahoo OHLCV rows are excluded for manual review."
+        elif calibrated and candidate_count:
             status = "repairable_gaps"
-            details = "All identified gaps/invalid rows passed the adjusted-price basis consistency check."
+            details = "All repair candidates passed the adjusted-price basis consistency check."
+        elif source_invalid_sessions:
+            status = "review_required"
+            details = "Yahoo returned invalid OHLCV on one or more sessions; no repair is generated for those rows."
         else:
             status = calibration["status"]
             details = "Data defects found, but not approved for automatic repair."
@@ -609,7 +615,8 @@ def audit_price_coverage(
         })
         print(
             f"[{position}/{len(tickers)}] {ticker}: "
-            f"{missing_sessions} missing row(s), {invalid_sessions_found} invalid row(s), "
+            f"{missing_sessions} missing row(s), {invalid_sessions_found} invalid stored row(s), "
+            f"{source_invalid_sessions} invalid Yahoo row(s), "
             f"{candidate_count} repair candidate(s), status={status}"
         )
     output_dir.mkdir(parents=True, exist_ok=True)
