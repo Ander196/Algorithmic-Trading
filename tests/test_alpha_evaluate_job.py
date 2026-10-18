@@ -2,7 +2,13 @@ import pandas as pd
 import pytest
 
 from core.alpha_evaluation import AlphaEvaluationReport
-from jobs.evaluate_alpha import _print_diagnostics, _to_ohlcv_frame, get_alpha_universe
+from jobs.evaluate_alpha import (
+    _convert_stock_histories_to_usd,
+    _print_diagnostics,
+    _to_ohlcv_frame,
+    get_alpha_universe,
+)
+from jobs import evaluate_alpha as evaluate_alpha_module
 
 
 class _FakeQuery:
@@ -60,6 +66,67 @@ def test_to_ohlcv_frame_normalizes_datetime_and_columns() -> None:
         pd.Timestamp("2024-01-03"),
     ]
     assert list(frame.columns) == ["open", "high", "low", "close", "volume"]
+
+
+
+
+def test_to_ohlcv_frame_adjusts_all_price_fields_to_adj_close() -> None:
+    raw = pd.DataFrame(
+        {
+            "price_date": ["2024-01-02"],
+            "open": [99.0],
+            "high": [110.0],
+            "low": [90.0],
+            "close": [100.0],
+            "adj_close": [90.0],
+            "volume": [1000],
+        }
+    )
+
+    frame = _to_ohlcv_frame(raw)
+
+    assert frame.iloc[0]["open"] == pytest.approx(89.1)
+    assert frame.iloc[0]["high"] == pytest.approx(99.0)
+    assert frame.iloc[0]["low"] == pytest.approx(81.0)
+    assert frame.iloc[0]["close"] == pytest.approx(90.0)
+
+
+def test_convert_stock_histories_to_usd_aligns_fx_without_lookahead(monkeypatch) -> None:
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    local_history = pd.DataFrame(
+        {
+            "open": [100.0, 101.0, 102.0],
+            "high": [105.0, 106.0, 107.0],
+            "low": [98.0, 99.0, 100.0],
+            "close": [102.0, 103.0, 104.0],
+            "volume": [1000.0, 1100.0, 1200.0],
+        },
+        index=dates,
+    )
+    fx_dates = pd.DatetimeIndex([dates[1], dates[2]])
+    fx_series = pd.Series([1.1, 1.2], index=fx_dates, name="EUR")
+    market = pd.DataFrame(
+        {
+            "open": [100.0, 101.0, 102.0],
+            "high": [105.0, 106.0, 107.0],
+            "low": [98.0, 99.0, 100.0],
+            "close": [102.0, 103.0, 104.0],
+            "volume": [1_000_000.0] * 3,
+        },
+        index=dates,
+    )
+    monkeypatch.setattr(
+        evaluate_alpha_module,
+        "_fx_usd_per_unit",
+        lambda currency, start, end: fx_series,
+    )
+
+    converted = _convert_stock_histories_to_usd({"AAA.DE": local_history}, market)
+    usd_history = converted["AAA.DE"]
+
+    assert usd_history.index.tolist() == [dates[1], dates[2]]
+    assert usd_history["close"].tolist() == pytest.approx([103.0 * 1.1, 104.0 * 1.2])
+    assert usd_history["volume"].tolist() == [1100.0, 1200.0]
 
 
 def test_to_ohlcv_frame_rejects_missing_columns() -> None:
