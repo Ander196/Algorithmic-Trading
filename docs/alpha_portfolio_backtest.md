@@ -90,6 +90,8 @@ The job creates three local CSV files:
   cost rate, turnover, and equity curve for each portfolio.
 - `alpha_portfolio_holdings.csv`: holdings and weights by execution date,
   including the signal date used.
+- `alpha_portfolio_cost_sensitivity.csv`: summary metrics across the
+  `--cost-sensitivity-bps` scenarios (default `5,10,25`).
 
 `transaction_cost_bps` is charged against gross traded notional. Turnover is
 `sum(abs(new_weight - old_weight))`, so a full rotation from one fully invested
@@ -100,14 +102,19 @@ sensitivity to higher costs before interpreting results.
 
 ## Limitations and decision gate
 
-This backtest is only as reliable as the OOS score history and adjusted-price
-panel. It compares the supplied scores with base-currency returns but cannot
-repair an upstream target mismatch. Verify that Alpha training labels and
-features for non-USD listings are currency-consistent with SPY before
-interpreting their aggregate contribution. It does not correct survivorship bias
-if scores were generated from the current active universe, does not model market
-impact or taxes, and does not simulate actual order types, partial fills,
-liquidity or RiskManager limits.
+The OOS evaluation job now requests `adj_close`, scales all OHLC fields to
+that per-row adjusted basis, and converts supported non-USD listing histories
+to USD before Alpha features and excess-return labels are built. This makes the
+training target currency-consistent with SPY for supported ticker suffixes.
+FX uses daily reference/close data and bounded forward-fill of at most five
+ticker sessions; leading and longer FX gaps remain missing rather than being
+filled with future quotes. This is still a daily approximation to executable FX.
+
+The current active universe is still applied to historical data, so survivorship
+bias is not corrected. The model does not simulate actual order types, partial
+fills, market impact, taxes, liquidity constraints or RiskManager limits. Keep
+the results research-only and reserve a final untouched holdout before using
+these backtest results to make a strategy decision.
 The equal-weight universe is restricted to the model's eligible OOS rows; it is
 not a point-in-time survivorship-free broad-market index.
 
@@ -132,10 +139,11 @@ listings to USD using historical FX closes:
 python -m jobs.export_alpha_adjusted_prices --predictions-csv reports/alpha_diagnostics/alpha_oos_predictions.csv --output-csv reports/adjusted_close_prices_base_currency.csv --benchmark-ticker SPY
 ```
 
-Finally, run the portfolio backtest:
+Finally, run the portfolio backtest and cost sensitivity (default scenarios are
+5, 10 and 25 basis points):
 
 ```powershell
-python -m jobs.backtest_alpha_portfolios --predictions-csv reports/alpha_diagnostics/alpha_oos_predictions.csv --prices-csv reports/adjusted_close_prices_base_currency.csv --output-dir reports/alpha_portfolio_backtest --benchmark-ticker SPY --top-n 5 --rebalance-every 5 --transaction-cost-bps 5
+python -m jobs.backtest_alpha_portfolios --predictions-csv reports/alpha_diagnostics/alpha_oos_predictions.csv --prices-csv reports/adjusted_close_prices_base_currency.csv --output-dir reports/alpha_portfolio_backtest --benchmark-ticker SPY --top-n 5 --rebalance-every 5 --transaction-cost-bps 5 --cost-sensitivity-bps 5,10,25
 ```
 
 The price export leaves dates before the first valid FX quote missing rather than
