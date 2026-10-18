@@ -13,6 +13,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from data.excluded_tickers import filter_excluded_ticker_rows, is_excluded_ticker
+
 
 @dataclass(frozen=True)
 class PortfolioBacktestConfig:
@@ -70,6 +72,14 @@ def _validate_predictions(predictions: pd.DataFrame) -> pd.DataFrame:
     rows = predictions.reset_index().copy()
     rows["date"] = _naive_dates(pd.Index(rows["date"]))
     rows["ticker"] = rows["ticker"].astype(str)
+    rows, excluded_tickers = filter_excluded_ticker_rows(rows)
+    if excluded_tickers:
+        print(
+            "Excluding retired/invalid tickers from portfolio predictions: "
+            + ", ".join(excluded_tickers)
+        )
+    if rows.empty:
+        raise ValueError("predictions contain no eligible tickers after exclusions")
     if rows.duplicated(["date", "ticker"]).any():
         raise ValueError("predictions contain duplicate (date, ticker) rows")
     rows["expected_excess_return"] = pd.to_numeric(
@@ -210,6 +220,8 @@ def run_alpha_portfolio_backtest(
     The benchmark is buy-and-hold and pays its initial purchase cost once.
     """
     config = config or PortfolioBacktestConfig()
+    if is_excluded_ticker(benchmark_ticker):
+        raise ValueError(f"benchmark ticker {benchmark_ticker!r} is excluded")
     predictions = _validate_predictions(oos_predictions)
     prices = _prepare_prices(close_prices, benchmark_ticker, config)
     if predictions.empty:
