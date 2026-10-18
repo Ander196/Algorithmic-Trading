@@ -11,6 +11,8 @@ python -m jobs.audit_alpha_price_coverage \`
 
 The audit is read-only and checks all tickers in the OOS predictions plus the benchmark over the SPY-session window needed by the backtest: the momentum lookback before the first signal, the OOS signal dates, and two forward sessions after the last signal.
 
+Rows for tickers in `data/excluded_tickers.py` are removed before coverage checks. WBD is explicitly retired, is not queried in this audit, and cannot be brought back by an old prediction CSV. Its existing Supabase records are handled only by the separate reviewed purge SQL.
+
 It compares Yahoo Finance price observations with Supabase, checks required OHLCV fields, and estimates a stable scale factor from overlapping adjusted closes. It does not automatically approve a repair if overlap is insufficient or the scale varies by more than the configured tolerance.
 
 ## Outputs
