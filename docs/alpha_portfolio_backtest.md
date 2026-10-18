@@ -173,3 +173,34 @@ move until the next available close. It is a bounded data-quality compromise,
 not a substitute for fixing missing source data. Do not increase the limit
 without inspecting the affected tickers and dates. A gap longer than the limit
 must still stop the backtest if a held asset has no valid next-session return.
+
+
+## Retired ticker: WBD
+
+WBD is explicitly excluded from the shared ticker blocklist used by ingestion,
+Alpha dataset construction, price-coverage audit, adjusted-price export and
+portfolio backtests. It is also removed from the ticker-catalog candidates.
+Older prediction CSVs are filtered before downstream processing, so WBD cannot
+re-enter through a stale file.
+
+To purge WBD's existing records from Supabase, first run
+`scripts/sql/preview_wbd_removal.sql` and review the per-table counts. Then run
+`scripts/sql/remove_wbd_from_supabase.sql` in Supabase SQL Editor and verify
+the postcondition counts are zero. The purge script covers ticker-keyed rows
+in stocks, prices, signals, requests, HMM outputs, risk models and allocations,
+and handles any regime results/models keyed to a WBD market ticker. These SQL
+files are prepared in the PR; database execution has not been performed by the
+repository workflow.
+
+## July 29, 2026 Ridge return attribution
+
+Ridge's reported 15.3314% gross/net return on the July 29 execution session uses
+the holdings selected from the July 28 signal. Under the backtest's delayed
+execution convention, that return is the adjusted USD move from the July 29
+close to the July 30 close for AMAT, INTC, LRCX, MU and TER. Rebuilding from the
+published two-decimal adjusted closes and the saved full-precision weights gives
+15.331162%, a residual of about 0.024 basis points versus the CSV return. That
+small residual is consistent with the source quotes being shown only to two
+decimals; exact full-precision reconciliation still requires the October export
+panel used by the run. Do not replace or “correct” the recorded return based on
+rounded web quotes.
