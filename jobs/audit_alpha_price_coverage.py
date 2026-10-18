@@ -228,6 +228,7 @@ def _find_repair_dates(
             repair_dates.append((date, "update_invalid", reasons))
     return repair_dates
 
+
 def _calibrate_price_scale(
     stored_adj_close: pd.Series,
     yahoo_adj_close: pd.Series,
@@ -385,6 +386,7 @@ def _render_repair_sql(rows: list[dict], batch_size: int = 200) -> str:
     statements.extend(["", "COMMIT;", ""])
     return "\n".join(statements)
 
+
 def audit_price_coverage(
     predictions_csv: Path,
     output_dir: Path,
@@ -470,10 +472,6 @@ def audit_price_coverage(
         stored_window = stored.loc[stored.index.isin(calendar)]
         yahoo_sessions = int(yahoo_history["adj_close"].notna().sum())
         supabase_sessions = int(len(stored_window))
-        invalid_sessions = sum(
-            1 for _, stored_row in stored_window.iterrows()
-            if _stored_row_invalid_reasons(stored_row)
-        )
 
         if stored_window.empty:
             summary_rows.append({
@@ -613,7 +611,8 @@ def audit_price_coverage(
         "gap_rows": len(gap_rows),
         "repair_candidates": len(repair_rows),
         "review_gaps": sum(
-            row["classification"] != "repair_candidate" for row in gap_rows
+            not row["classification"].startswith("repair_candidate")
+            for row in gap_rows
         ),
         "provider_or_database_errors": database_errors,
     }
