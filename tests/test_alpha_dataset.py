@@ -59,3 +59,16 @@ def test_invalid_inputs_are_rejected() -> None:
     bad = _bars(1).drop(columns=["volume"])
     with pytest.raises(ValueError, match="missing required columns"):
         AlphaDatasetBuilder().build({"AAA": bad}, _bars(2))
+
+
+
+def test_dataset_builder_excludes_retired_wbd_ticker():
+    stock = _bars(1)
+    market = _bars(2)
+    dataset = AlphaDatasetBuilder(
+        AlphaDatasetConfig(min_history=252, horizon_days=5)
+    ).build({"AAA": stock, "WBD": stock, "BBB": _bars(3)}, market)
+
+    tickers = set(dataset.index.get_level_values("ticker"))
+    assert tickers == {"AAA", "BBB"}
+    assert "WBD" not in tickers

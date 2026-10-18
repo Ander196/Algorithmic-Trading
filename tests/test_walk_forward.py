@@ -44,6 +44,44 @@ def test_walk_forward_is_chronological_and_purged() -> None:
     assert pd.to_datetime(train["label_end_date"]).max() < folds[0].test_start
 
 
+def test_partial_final_test_fold_is_included_only_when_enabled() -> None:
+    dataset = _dataset(periods=35)
+    dates = pd.DatetimeIndex(
+        pd.to_datetime(dataset.index.get_level_values("date").unique())
+    ).sort_values()
+
+    default_protocol = WalkForwardProtocol(
+        WalkForwardConfig(
+            train_period=20,
+            test_period=10,
+            step_period=10,
+            min_train_rows=1,
+        )
+    )
+    assert len(list(default_protocol.split(dataset))) == 1
+
+    protocol = WalkForwardProtocol(
+        WalkForwardConfig(
+            train_period=20,
+            test_period=10,
+            step_period=10,
+            min_train_rows=1,
+            include_partial_test_fold=True,
+        )
+    )
+    folds = list(protocol.split(dataset))
+
+    assert len(folds) == 2
+    assert folds[-1].test_start == dates[30]
+    assert folds[-1].test_end == dates[-1]
+    assert folds[-1].test_rows == 5 * 3
+
+    train, test = materialize_fold(dataset, folds[-1])
+    assert len(test) == 5 * 3
+    assert train.index.get_level_values("date").max() < test.index.get_level_values("date").min()
+    assert pd.to_datetime(train["label_end_date"]).max() < folds[-1].test_start
+
+
 def test_invalid_dataset_index_is_rejected() -> None:
     dataset = _dataset().reset_index()
     protocol = WalkForwardProtocol(

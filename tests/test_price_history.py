@@ -11,7 +11,8 @@ class _FakeQuery:
         self.start = 0
         self.end = -1
 
-    def select(self, *_args):
+    def select(self, columns):
+        self.selected_columns = columns.split(",")
         return self
 
     def eq(self, *_args):
@@ -27,7 +28,13 @@ class _FakeQuery:
         return self
 
     def execute(self):
-        return type("Response", (), {"data": self.rows[self.start : self.end + 1]})()
+        rows = self.rows[self.start : self.end + 1]
+        if hasattr(self, "selected_columns"):
+            rows = [
+                {key: value for key, value in row.items() if key in self.selected_columns}
+                for row in rows
+            ]
+        return type("Response", (), {"data": rows})()
 
 
 class _FakeClient:
@@ -104,7 +111,39 @@ def test_fetch_price_history_rejects_excluded_tickers_before_querying():
 
     assert client.ranges == []
 
+def test_invalid_price_history_logs_reasons_as_supabase_read(caplog):
+    rows = _rows(5)
+    rows[0]["open"] = 0
+    client = _FakeClient(rows)
+
+    with caplog.at_level("WARNING"):
+        frame = fetch_price_history(client, "AAPL", limit=None)
+
+    assert len(frame) == 4
+    assert "Supabase read | AAPL" in caplog.text
+    assert "non_positive_ohlc_values" in caplog.text
+    assert "before upload" not in caplog.text
+
 
 def test_fetch_price_history_raises_when_ticker_has_no_history():
     with pytest.raises(RuntimeError, match="No price history found for AAPL"):
         fetch_price_history(_FakeClient([]), "AAPL", limit=None)
+
+
+def test_fetch_price_history_can_include_valid_adjusted_close() -> None:
+    rows = _rows(5)
+    for row in rows:
+        row["adj_close"] = row["close"] * 0.95
+    client = _FakeClient(rows)
+
+    frame = fetch_price_history(
+        client,
+        "AAPL",
+        limit=None,
+        include_adj_close=True,
+    )
+
+    assert "adj_close" in frame.columns
+    assert frame["adj_close"].tolist() == pytest.approx(
+        [row["close"] * 0.95 for row in sorted(rows, key=lambda row: row["price_date"])]
+    )

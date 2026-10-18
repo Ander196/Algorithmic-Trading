@@ -1,8 +1,7 @@
-"""Tickers excluded because their stored OHLC history is known to be invalid.
+"""Tickers deliberately removed from ingestion and research workflows.
 
-Keep this list aligned with the controlled Supabase cleanup. Exclusion is applied
-at ingestion and research-universe boundaries so future loaders do not restore
-these rows or reactivate the symbols.
+Entries include known invalid price histories and symbols explicitly retired
+from this research universe. Keep this list aligned with the Supabase cleanup.
 """
 
 EXCLUDED_TICKERS = frozenset(
@@ -25,6 +24,8 @@ EXCLUDED_TICKERS = frozenset(
         "SHEL.L",
         "ULVR.L",
         "VOD.L",
+        # Explicitly retired: no usable stored history; do not re-add it.
+        "WBD",
     }
 )
 
@@ -37,3 +38,20 @@ def normalize_ticker(ticker: object) -> str:
 def is_excluded_ticker(ticker: object) -> bool:
     """Return whether a ticker is explicitly excluded from market data."""
     return normalize_ticker(ticker) in EXCLUDED_TICKERS
+
+
+
+def filter_excluded_ticker_rows(rows, ticker_column: str = "ticker"):
+    """Return a normalized copy without explicitly excluded ticker rows.
+
+    Shared by CSV, audit and portfolio entry points so they honour the same
+    blocklist as ingestion and the Alpha universe.
+    """
+    if ticker_column not in rows.columns:
+        raise ValueError(f"missing ticker column: {ticker_column}")
+    filtered = rows.copy()
+    normalized = filtered[ticker_column].map(normalize_ticker)
+    excluded_mask = normalized.isin(EXCLUDED_TICKERS)
+    excluded = tuple(sorted(normalized.loc[excluded_mask].dropna().unique().tolist()))
+    filtered[ticker_column] = normalized
+    return filtered.loc[~excluded_mask].copy(), excluded
