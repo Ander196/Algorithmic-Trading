@@ -2,9 +2,9 @@
 
 This job is research-only:
 - universe comes from stocks.is_active = true;
-- historical prices come from stock_prices;
-- AlphaDatasetBuilder creates point-in-time features/labels;
-- WalkForwardProtocol and AlphaEvaluator produce OOS metrics;
+- adjusted OHLC prices come from stock_prices and are normalized to USD for supported foreign listings;
+- AlphaDatasetBuilder creates point-in-time features/labels on that common price basis;
+- WalkForwardProtocol and AlphaEvaluator produce OOS metrics, including a final partial test fold;
 - no Strategy, RiskManager, execution, or production Top-N selection is performed.
 
 V1 caveat:
