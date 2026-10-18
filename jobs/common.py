@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 from supabase import Client, create_client
 
@@ -23,13 +24,16 @@ def fetch_price_history(
     client: Client,
     ticker: str,
     limit: int | None = 1500,
+    *,
+    include_adj_close: bool = False,
 ) -> pd.DataFrame:
     """Read OHLCV history using Supabase pagination.
 
     By default, fetch the most recent 1500 rows for compatibility with other
     jobs. Pass ``limit=None`` to fetch every available row. An explicit positive
     limit caps the result to the most recent observations. Results are returned
-    chronologically for rolling features and models.
+    chronologically for rolling features and models. Alpha evaluation can set
+    ``include_adj_close=True`` to reconstruct adjusted OHLC prices consistently.
     """
     ticker = normalize_ticker(ticker)
     if is_excluded_ticker(ticker):
@@ -38,6 +42,9 @@ def fetch_price_history(
         raise ValueError("limit must be greater than zero")
 
     rows: list[dict] = []
+    selected_columns = "price_date,open,high,low,close,volume"
+    if include_adj_close:
+        selected_columns += ",adj_close"
     page_size = 1000
     offset = 0
 
@@ -48,7 +55,7 @@ def fetch_price_history(
 
         response = (
             client.table("stock_prices")
-            .select("price_date,open,high,low,close,volume")
+            .select(selected_columns)
             .eq("ticker", ticker.upper())
             .order("price_date", desc=True)
             .range(offset, offset + remaining - 1)
@@ -73,6 +80,19 @@ def fetch_price_history(
     df = validate_ohlcv_frame(df, ticker, context="Supabase read")
     if df is None or df.empty:
         raise RuntimeError(f"No valid OHLCV history found for {ticker}")
+    if include_adj_close:
+        df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
+        adj = df["adj_close"].to_numpy(dtype=float)
+        valid_adj = np.isfinite(adj) & (adj > 0)
+        if not valid_adj.all():
+            logger.warning(
+                "%s: excluding %d rows without valid adjusted close",
+                ticker,
+                int((~valid_adj).sum()),
+            )
+            df = df.loc[valid_adj].copy()
+        if df.empty:
+            raise RuntimeError(f"No valid adjusted-close history found for {ticker}")
     if limit is not None:
         df = df.tail(limit)
     return df.reset_index(drop=True)
