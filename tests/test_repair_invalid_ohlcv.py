@@ -40,6 +40,13 @@ def _provider_daily():
     )
 
 
+def _unadjusted_daily_history(raw_close=100.0, adjusted_close=100.0):
+    return pd.DataFrame(
+        {"Close": [raw_close], "Adj Close": [adjusted_close]},
+        index=pd.to_datetime(["2026-10-12"]),
+    )
+
+
 def _intraday_history(count=78):
     index = pd.date_range(
         "2026-10-12 09:30",
@@ -104,6 +111,7 @@ def test_intraday_preview_changes_only_high_low_and_records_coverage():
         _audit_rows(),
         mode="intraday-high-low",
         fetcher=fetcher,
+        adjustment_fetcher=lambda *_args: _unadjusted_daily_history(),
     )
 
     assert calls == [("AAPL", pd.Timestamp("2026-10-12").date(),
@@ -130,10 +138,44 @@ def test_intraday_preview_rejects_insufficient_intraday_history(count):
         _audit_rows(),
         mode="intraday-high-low",
         fetcher=lambda *_args: history,
+        adjustment_fetcher=lambda *_args: _unadjusted_daily_history(),
     )
 
     assert result.loc[0, "repair_status"] == "intraday_data_rejected"
     assert "intraday_data_missing" in result.loc[0, "repair_error"] or "insufficient_intraday_bars" in result.loc[0, "repair_error"]
+
+
+def test_intraday_extrema_are_converted_to_adjusted_price_basis():
+    history = _intraday_history()
+    history.loc[history.index[20], "High"] = 110.0
+    history.loc[history.index[25], "Low"] = 90.0
+
+    result = repair_candidates(
+        _audit_rows(),
+        mode="intraday-high-low",
+        fetcher=lambda *_args: history,
+        adjustment_fetcher=lambda *_args: _unadjusted_daily_history(
+            raw_close=100.0, adjusted_close=95.0
+        ),
+    )
+
+    row = result.iloc[0]
+    assert row["repair_status"] == "would_update_intraday_high_low"
+    assert row["proposed_high"] == pytest.approx(104.5)
+    assert row["proposed_low"] == pytest.approx(85.5)
+    assert "factor 0.95" in row["repair_error"]
+
+
+def test_intraday_preview_fails_closed_when_adjustment_factor_is_unavailable():
+    result = repair_candidates(
+        _audit_rows(),
+        mode="intraday-high-low",
+        fetcher=lambda *_args: _intraday_history(),
+        adjustment_fetcher=lambda *_args: pd.DataFrame(),
+    )
+
+    assert result.loc[0, "repair_status"] == "adjustment_factor_unavailable"
+    assert "daily adjustment history is missing" in result.loc[0, "repair_error"]
 
 
 def test_intraday_preview_rejects_invalid_intraday_bars():
@@ -158,6 +200,7 @@ def test_intraday_preview_refuses_non_geometry_defects():
         candidate,
         mode="intraday-high-low",
         fetcher=lambda *_args: _intraday_history(),
+        adjustment_fetcher=lambda *_args: _unadjusted_daily_history(),
     )
 
     assert result.loc[0, "repair_status"] == "manual_review_existing_zero_volume"
@@ -235,6 +278,7 @@ def _approved_intraday_report(approved=True):
         _audit_rows(),
         mode="intraday-high-low",
         fetcher=lambda *_args: _intraday_history(),
+        adjustment_fetcher=lambda *_args: _unadjusted_daily_history(),
     )
     preview.loc[0, "approved"] = approved
     return preview
@@ -334,6 +378,7 @@ def test_intraday_preview_rejects_large_gaps_even_when_bar_count_is_sufficient()
         _audit_rows(),
         mode="intraday-high-low",
         fetcher=lambda *_args: history,
+        adjustment_fetcher=lambda *_args: _unadjusted_daily_history(),
     )
 
     assert result.loc[0, "repair_status"] == "intraday_data_rejected"
