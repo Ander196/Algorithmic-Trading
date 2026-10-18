@@ -56,8 +56,10 @@ def _intraday_history(count=78):
     )
     highs = [101.0] * count
     lows = [99.0] * count
-    highs[20] = 103.0
-    lows[25] = 97.0
+    if count > 20:
+        highs[20] = 103.0
+    if count > 25:
+        lows[25] = 97.0
     return pd.DataFrame(
         {
             "Open": [100.0] * count,
