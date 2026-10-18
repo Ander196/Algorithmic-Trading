@@ -152,6 +152,9 @@ def evaluate_alpha(
             step_period=126,
             horizon_days=dataset_config.horizon_days,
             min_train_rows=500,
+            # Keep full 126-session folds, and include the freshest partial fold
+            # so a new evaluation does not wait another six months for a full block.
+            include_partial_test_fold=True,
         )
     )
     evaluator = AlphaEvaluator(
