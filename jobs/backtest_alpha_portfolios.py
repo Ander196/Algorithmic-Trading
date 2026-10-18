@@ -7,6 +7,8 @@ same base currency (for example USD), including FX changes for foreign listings.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -15,6 +17,22 @@ from core.alpha_portfolio_backtest import (
     PortfolioBacktestConfig,
     run_alpha_portfolio_backtest,
 )
+
+
+def _parse_cost_sensitivity_bps(value: str) -> tuple[float, ...]:
+    """Parse unique, non-negative transaction-cost scenarios in basis points."""
+    parts = [part.strip() for part in value.split(",")]
+    if not parts or any(not part for part in parts):
+        raise ValueError("cost sensitivity must be a comma-separated list such as 5,10,25")
+    try:
+        scenarios = tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise ValueError("cost sensitivity values must be numeric") from exc
+    if any(not math.isfinite(cost) or cost < 0 for cost in scenarios):
+        raise ValueError("cost sensitivity values must be finite and >= 0")
+    if len(set(scenarios)) != len(scenarios):
+        raise ValueError("cost sensitivity values must not contain duplicates")
+    return scenarios
 
 
 def _load_predictions(path: Path) -> pd.DataFrame:
@@ -61,6 +79,11 @@ def main() -> None:
     parser.add_argument("--top-n", type=int, default=5)
     parser.add_argument("--rebalance-every", type=int, default=5)
     parser.add_argument("--transaction-cost-bps", type=float, default=5.0)
+    parser.add_argument(
+        "--cost-sensitivity-bps",
+        default="5,10,25",
+        help="Comma-separated cost scenarios (default: 5,10,25); writes a comparison CSV.",
+    )
     parser.add_argument("--min-cross-section", type=int, default=20)
     parser.add_argument("--momentum-lookback", type=int, default=60)
     parser.add_argument("--max-stale-sessions", type=int, default=0)
@@ -75,6 +98,7 @@ def main() -> None:
             momentum_lookback=args.momentum_lookback,
             max_stale_sessions=args.max_stale_sessions,
         )
+        sensitivity_costs = _parse_cost_sensitivity_bps(args.cost_sensitivity_bps)
         predictions = _load_predictions(args.predictions_csv)
         prices = _load_adjusted_price_panel(args.prices_csv)
         report = run_alpha_portfolio_backtest(
@@ -83,6 +107,23 @@ def main() -> None:
             benchmark_ticker=args.benchmark_ticker,
             config=config,
         )
+        sensitivity_rows = []
+        for cost_bps in sensitivity_costs:
+            scenario_config = replace(config, transaction_cost_bps=cost_bps)
+            scenario_report = (
+                report
+                if cost_bps == config.transaction_cost_bps
+                else run_alpha_portfolio_backtest(
+                    predictions,
+                    prices,
+                    benchmark_ticker=args.benchmark_ticker,
+                    config=scenario_config,
+                )
+            )
+            scenario_summary = scenario_report.summary.copy()
+            scenario_summary.insert(0, "transaction_cost_bps", cost_bps)
+            sensitivity_rows.append(scenario_summary)
+        sensitivity = pd.concat(sensitivity_rows, ignore_index=True)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
 
@@ -90,8 +131,19 @@ def main() -> None:
     report.summary.to_csv(args.output_dir / "alpha_portfolio_summary.csv", index=False)
     report.daily_returns.to_csv(args.output_dir / "alpha_portfolio_daily_returns.csv")
     report.holdings.to_csv(args.output_dir / "alpha_portfolio_holdings.csv", index=False)
+    sensitivity.to_csv(
+        args.output_dir / "alpha_portfolio_cost_sensitivity.csv", index=False
+    )
     print("\n=== OOS Portfolio Backtest (net of configured costs) ===")
     print(report.summary.to_string(index=False, float_format=lambda value: f"{value:.6f}"))
+    print("\n=== Transaction-Cost Sensitivity ===")
+    display_columns = [
+        "transaction_cost_bps", "strategy", "annualized_return",
+        "annualized_volatility", "sharpe_ratio_rf0", "max_drawdown",
+    ]
+    print(sensitivity[display_columns].to_string(
+        index=False, float_format=lambda value: f"{value:.6f}"
+    ))
     print(f"CSV reports written to: {args.output_dir.resolve()}")
 
 
