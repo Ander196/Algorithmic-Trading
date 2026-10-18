@@ -12,6 +12,7 @@ from jobs.export_alpha_adjusted_prices import (
     _currency_scale,
     _fetch_adjusted,
     _fetch_eur_usd_reference,
+    _fx_usd_per_unit,
     _select_backtest_calendar,
 )
 
@@ -244,3 +245,51 @@ def test_eur_fx_wraps_network_errors_without_disabling_tls(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="Could not download ECB EUR/USD"):
         _fetch_eur_usd_reference("2008-08-01", "2008-08-31")
+
+def test_eur_fx_routes_to_ecb_without_using_yahoo(monkeypatch) -> None:
+    expected = pd.Series(
+        [1.47],
+        index=pd.DatetimeIndex([pd.Timestamp("2008-08-18")]),
+        name="EUR",
+    )
+    monkeypatch.setattr(
+        export_job,
+        "_fetch_eur_usd_reference",
+        lambda start, end: expected,
+    )
+    monkeypatch.setattr(
+        export_job.yf,
+        "Ticker",
+        lambda *_args, **_kwargs: pytest.fail("EUR must not use Yahoo FX"),
+    )
+
+    actual = _fx_usd_per_unit("EUR", "2008-08-01", "2008-08-31")
+
+    pd.testing.assert_series_equal(actual, expected)
+
+def test_non_eur_fx_keeps_using_yahoo(monkeypatch) -> None:
+    history = pd.DataFrame(
+        {"Close": [1.25]},
+        index=pd.DatetimeIndex([pd.Timestamp("2024-01-02")]),
+    )
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            assert symbol == "GBPUSD=X"
+
+        def history(self, **kwargs):
+            assert kwargs["start"] == "2024-01-01"
+            assert kwargs["auto_adjust"] is False
+            return history
+
+    monkeypatch.setattr(export_job.yf, "Ticker", FakeTicker)
+    monkeypatch.setattr(
+        export_job,
+        "_fetch_eur_usd_reference",
+        lambda *_args, **_kwargs: pytest.fail("Non-EUR currency must not use ECB"),
+    )
+
+    actual = _fx_usd_per_unit("GBP", "2024-01-01", "2024-01-03")
+
+    assert actual.index.tolist() == [pd.Timestamp("2024-01-02")]
+    assert actual.tolist() == [1.25]
