@@ -3,7 +3,13 @@ import pandas as pd
 import pytest
 
 from core.alpha_dataset import DEFAULT_FEATURE_COLUMNS
-from core.alpha_evaluation import AlphaEvaluationConfig, AlphaEvaluator
+from core.alpha_evaluation import (
+    AlphaEvaluationConfig,
+    AlphaEvaluationReport,
+    AlphaEvaluator,
+    FoldMetrics,
+    TopNMetrics,
+)
 from core.alpha_model import AlphaModelConfig
 from core.walk_forward import WalkForwardConfig, WalkForwardFold, WalkForwardProtocol
 
@@ -89,6 +95,72 @@ def test_predictions_require_expected_and_realized_returns() -> None:
     with pytest.raises(ValueError, match="missing"):
         evaluator.evaluate_fold(predictions, _fold(len(predictions)))
 
+
+
+def test_partial_final_fold_does_not_get_equal_weight_in_summary() -> None:
+    metric_full = TopNMetrics(
+        top_n=5,
+        mean_excess_return=0.02,
+        mean_universe_excess_return=0.01,
+        mean_top_vs_universe_spread=0.01,
+        mean_top_vs_bottom_spread=0.03,
+        mean_hit_rate=0.6,
+        valid_dates=10,
+    )
+    metric_partial = TopNMetrics(
+        top_n=5,
+        mean_excess_return=-0.10,
+        mean_universe_excess_return=-0.02,
+        mean_top_vs_universe_spread=-0.08,
+        mean_top_vs_bottom_spread=-0.12,
+        mean_hit_rate=0.2,
+        valid_dates=2,
+    )
+    folds = (
+        FoldMetrics(
+            fold_id=0,
+            test_start=pd.Timestamp("2024-01-01"),
+            test_end=pd.Timestamp("2024-01-12"),
+            train_rows=100,
+            test_rows=100,
+            valid_dates=10,
+            mean_ic=0.1,
+            median_ic=0.1,
+            ic_std=0.01,
+            ic_positive_fraction=0.8,
+            mean_cross_section=25.0,
+            top_n_metrics=(metric_full,),
+            ic_dates=10,
+        ),
+        FoldMetrics(
+            fold_id=1,
+            test_start=pd.Timestamp("2024-01-15"),
+            test_end=pd.Timestamp("2024-01-16"),
+            train_rows=100,
+            test_rows=20,
+            valid_dates=2,
+            mean_ic=-0.5,
+            median_ic=-0.5,
+            ic_std=0.02,
+            ic_positive_fraction=0.0,
+            mean_cross_section=20.0,
+            top_n_metrics=(metric_partial,),
+            ic_dates=2,
+        ),
+    )
+    report = AlphaEvaluationReport(
+        model_version="test",
+        folds=folds,
+        oos_predictions=pd.DataFrame(),
+    )
+
+    top = report.aggregate_top_n(5)
+    assert top.mean_excess_return == pytest.approx(
+        (0.02 * 10 + -0.10 * 2) / 12
+    )
+    assert top.mean_hit_rate == pytest.approx((0.6 * 10 + 0.2 * 2) / 12)
+    assert report.mean_ic == pytest.approx((0.1 * 10 + -0.5 * 2) / 12)
+    assert report.ic_positive_fraction == pytest.approx((0.8 * 10) / 12)
 
 
 def test_walk_forward_report_preserves_features_for_baseline_diagnostics() -> None:
