@@ -1,0 +1,41 @@
+name: One-off Price Ingestion Validation
+
+on:
+  push:
+    branches:
+      - ops/validate-price-ingestion-20261019
+
+permissions:
+  contents: read
+
+concurrency:
+  group: one-off-price-ingestion-validation
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    name: Real price ingestion
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      MARKET_TICKER: ${{ vars.MARKET_TICKER || 'SPY' }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Ingest latest prices
+        run: python -m jobs.ingest_prices
