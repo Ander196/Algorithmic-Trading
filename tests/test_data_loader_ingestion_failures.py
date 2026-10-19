@@ -98,7 +98,10 @@ def test_fetch_price_data_rejects_dates_outside_requested_range(monkeypatch):
     monkeypatch.setattr(data_loader.yf, "Ticker", lambda ticker: FakeTicker())
     monkeypatch.setattr(data_loader.time, "sleep", lambda _: None)
 
-    with pytest.raises(RuntimeError, match="failed to fetch/validate"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"failed to fetch/validate.*outside requested range",
+    ):
         data_loader.fetchPriceData(
             "AAA",
             datetime(2026, 10, 15, tzinfo=timezone.utc),
