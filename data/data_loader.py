@@ -30,6 +30,22 @@ from data.price_validation import validate_ohlcv_frame
 load_dotenv(".env.secrets")
 
 
+class PriceUploadError(RuntimeError):
+    """Raised when one or more price rows could not be persisted."""
+
+
+def _is_duplicate_key_error(error: Exception) -> bool:
+    """Recognize PostgreSQL unique-key conflicts without hiding other failures."""
+    if getattr(error, "code", None) == "23505":
+        return True
+    response = getattr(error, "details", None)
+    message = " ".join(
+        str(value) for value in (error, response, getattr(error, "message", None))
+        if value is not None
+    )
+    return "23505" in message or "duplicate key value violates unique constraint" in message.lower()
+
+
 def getSupabaseClient() -> supabase.Client:
     """Initialize and return Supabase client."""
     supabaseUrl = os.getenv("SUPABASE_URL")
@@ -110,15 +126,28 @@ def fetchPriceData(
             keepCols = ["open", "high", "low", "close", "volume"]
             missing = sorted(set(keepCols) - set(df.columns))
             if missing:
-                print(
-                    f"  {ticker}: rejecting provider response; missing required "
-                    f"columns: {', '.join(missing)}"
+                raise ValueError(
+                    f"{ticker}: provider response is missing required columns: "
+                    f"{', '.join(missing)}"
                 )
-                return None
 
             df = df[keepCols].copy()
             df["ticker"] = ticker
             df["price_date"] = df.index.strftime("%Y-%m-%d")
+
+            # yfinance's end parameter is exclusive. Reject unexpected dates
+            # rather than allowing provider boundary behavior to create stale
+            # or out-of-window records in the database.
+            start_day = startDate.date().isoformat()
+            end_day = endDate.date().isoformat()
+            outside = ~df["price_date"].between(start_day, end_day, inclusive="left")
+            if outside.any():
+                bad_dates = df.loc[outside, "price_date"].astype(str).tolist()[:5]
+                raise ValueError(
+                    f"{ticker}: provider returned date(s) outside requested "
+                    f"range [{start_day}, {end_day}): {bad_dates}"
+                )
+
             df = df.reset_index(drop=True)
 
             # With auto_adjust=True, OHLC already includes corporate-action
@@ -127,10 +156,13 @@ def fetchPriceData(
 
             return validate_ohlcv_frame(df, ticker)
 
-        except Exception:
+        except Exception as exc:
             if attempt < retries - 1:
                 time.sleep(1 * (attempt + 1))
-            continue
+                continue
+            raise RuntimeError(
+                f"{ticker}: failed to fetch/validate provider prices after {retries} attempt(s)"
+            ) from exc
 
     return None
 
@@ -169,19 +201,39 @@ def uploadToSupabase(
         })
 
     inserted = 0
+    duplicates = 0
+    failures: list[str] = []
     for i in range(0, len(records), batchSize):
         batch = records[i:i + batchSize]
         try:
             client.table("stock_prices").insert(batch).execute()
             inserted += len(batch)
-        except Exception as e:
-            print(f"    Error inserting batch for {ticker}: {e}")
-            for record in batch:
-                try:
-                    client.table("stock_prices").insert(record).execute()
-                    inserted += 1
-                except Exception:
-                    pass
+            continue
+        except Exception as exc:
+            # Retry individually to isolate unique-key conflicts from genuine
+            # persistence errors; a failed batch is not itself proof every row
+            # failed, because some rows may already exist.
+            print(f"    Batch insert for {ticker} failed; retrying rows individually: {exc}")
+
+        for record in batch:
+            try:
+                client.table("stock_prices").insert(record).execute()
+                inserted += 1
+            except Exception as exc:
+                if _is_duplicate_key_error(exc):
+                    duplicates += 1
+                else:
+                    failures.append(f"{record['price_date']}: {exc}")
+
+    if duplicates:
+        print(f"    {ticker}: skipped {duplicates} row(s) already present (unique-key conflicts)")
+    if failures:
+        sample = "; ".join(failures[:5])
+        remainder = len(failures) - min(len(failures), 5)
+        suffix = f"; and {remainder} more" if remainder else ""
+        raise PriceUploadError(
+            f"{ticker}: failed to insert {len(failures)} row(s); {sample}{suffix}"
+        )
 
     return inserted
 
