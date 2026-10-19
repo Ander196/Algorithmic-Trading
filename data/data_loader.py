@@ -161,7 +161,8 @@ def fetchPriceData(
                 time.sleep(1 * (attempt + 1))
                 continue
             raise RuntimeError(
-                f"{ticker}: failed to fetch/validate provider prices after {retries} attempt(s)"
+                f"{ticker}: failed to fetch/validate provider prices after "
+                f"{retries} attempt(s): {exc}"
             ) from exc
 
     return None
@@ -238,6 +239,41 @@ def uploadToSupabase(
     return inserted
 
 
+def _build_daily_ingestion_window(
+    now: datetime, latest_date: datetime | None
+) -> tuple[datetime, datetime]:
+    """Return naive exchange-local date boundaries for completed daily bars.
+
+    yfinance interprets naive datetimes in each ticker's exchange timezone.
+    Passing UTC-aware midnight can shift the start date back to the prior
+    local calendar day and make an otherwise valid row fail boundary checks.
+
+    The regular workflow runs at 22:30 UTC, after cash-market close in the
+    supported markets. Before 22:00 UTC, today's date stays exclusive so a
+    partial daily candle is not ingested. At or after 22:00 UTC, tomorrow's
+    date is used as the exclusive end boundary so today's completed candle
+    can be included.
+    """
+    now_utc = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    today = now_utc.date()
+    end_day = today + timedelta(days=1) if now_utc.hour >= 22 else today
+
+    if latest_date is None:
+        target_year = today.year - 5
+        try:
+            start_day = today.replace(year=target_year)
+        except ValueError:
+            # February 29 does not exist in every target year.
+            start_day = today.replace(year=target_year, day=28)
+    else:
+        start_day = latest_date.date() + timedelta(days=1)
+
+    return (
+        datetime.combine(start_day, datetime.min.time()),
+        datetime.combine(end_day, datetime.min.time()),
+    )
+
+
 def processTicker(client: supabase.Client, ticker: str) -> dict[str, Any]:
     """Process one ticker unless it is on the permanent invalid-data blocklist."""
     ticker = normalize_ticker(ticker)
@@ -256,21 +292,26 @@ def processTicker(client: supabase.Client, ticker: str) -> dict[str, Any]:
 
     try:
         latestDate = getLatestPriceDate(client, ticker)
-        today = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        startDate, endDate = _build_daily_ingestion_window(now, latestDate)
 
         if latestDate is None:
-            startDate = today.replace(year=today.year - 5)
-            print(f"  {ticker}: No existing data, fetching from {startDate.date()} to {today.date()}")
+            print(
+                f"  {ticker}: No existing data, fetching from {startDate.date()} "
+                f"to {endDate.date()} (end exclusive)"
+            )
         else:
-            startDate = latestDate + timedelta(days=1)
-            print(f"  {ticker}: Last date={latestDate.date()}, fetching from {startDate.date()} to {today.date()}")
+            print(
+                f"  {ticker}: Last date={latestDate.date()}, fetching from "
+                f"{startDate.date()} to {endDate.date()} (end exclusive)"
+            )
 
-        if startDate.date() >= today.date():
-            print(f"  {ticker}: Already up to date")
+        if startDate.date() >= endDate.date():
+            print(f"  {ticker}: Already up to date (no completed daily bars in range)")
             result["skipped"] = 1
             return result
 
-        df = fetchPriceData(ticker, startDate, today)
+        df = fetchPriceData(ticker, startDate, endDate)
         if df is None or df.empty:
             print(f"  {ticker}: No new data fetched")
             return result
