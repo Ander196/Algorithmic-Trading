@@ -35,7 +35,7 @@ US_TICKERS = [
     "AMAT", "MU", "LRCX", "KLAC", "SNPS", "CDNS", "PANW", "CRWD", "FTNT", "NET",
     "ZS", "PLTR", "SNOW", "DDOG", "HUBS", "MDB", "TEAM", "WDAY", "OKTA", "SPLK",
     "NXPI", "ON", "MPWR", "ADI", "MCHP", "XEL", "CTAS", "CDW", "MNST", "KDP",
-    "GFS", "AS", "CPRT", "PAYC", "CDNS", "ANSS", "PTC", "SWKS", "QRVO", "KEYS",
+    "GFS", "AS", "CPRT", "PAYC", "CDNS", "ANSS", "PTC", "SWKS", "KEYS",
     "TER", "VEON", "LBTYK", "FOX", "DIS", "CMCSA", "CHTR", "T", "VZ",
     # Consumer/Retail
     "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "AXP",
