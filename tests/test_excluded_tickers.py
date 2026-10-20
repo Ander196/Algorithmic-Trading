@@ -9,9 +9,20 @@ def test_exclusion_list_contains_invalid_and_deliberately_retired_tickers():
         "ABI.BR", "ACA.PA", "ITX.MC", "UCG.MI",
         "AZN.L", "BATS.L", "BP.L", "BT-A.L", "GSK.L", "HSBA.L",
         "LSEG.L", "NG.L", "PRU.L", "REL.L", "RIO.L", "SHEL.L",
-        "ULVR.L", "VOD.L", "WBD",
+        "ULVR.L", "VOD.L", "WBD", "QRVO",
     }
     assert EXCLUDED_TICKERS == frozenset(expected)
+
+
+def test_qrvo_is_retired_from_static_catalog_and_both_price_loaders():
+    assert "QRVO" not in ticker_loader.US_TICKERS
+
+    for loader in (process_incremental_ticker, process_historical_ticker):
+        result = loader(client=object(), ticker=" qrvo ")
+        assert result["skipped"] == 1
+        assert result["fetched"] == 0
+        assert result["inserted"] == 0
+        assert result["error"] is None
 
 
 def test_ticker_normalization_is_whitespace_and_case_safe():
@@ -78,8 +89,8 @@ def test_excluded_row_filter_removes_wbd_from_csv_analysis():
     import pandas as pd
     from data.excluded_tickers import filter_excluded_ticker_rows
 
-    raw = pd.DataFrame({"ticker": ["aapl", " WBD ", "MSFT"], "score": [1, 2, 3]})
+    raw = pd.DataFrame({"ticker": ["aapl", " WBD ", " qrvo ", "MSFT"], "score": [1, 2, 3, 4]})
     filtered, excluded = filter_excluded_ticker_rows(raw)
 
     assert filtered["ticker"].tolist() == ["AAPL", "MSFT"]
-    assert excluded == ("WBD",)
+    assert excluded == ("QRVO", "WBD")

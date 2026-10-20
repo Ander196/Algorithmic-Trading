@@ -26,6 +26,8 @@ EXCLUDED_TICKERS = frozenset(
         "VOD.L",
         # Explicitly retired: no usable stored history; do not re-add it.
         "WBD",
+        # Retired after merger; preserve history but exclude from active data/research.
+        "QRVO",
     }
 )
 
