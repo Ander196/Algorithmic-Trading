@@ -230,9 +230,10 @@ def getNowTimestamptz() -> str:
 
 def uploadToSupabase(df: pd.DataFrame, client: supabase.Client) -> tuple[int, int]:
     """
-    Upload tickers to Supabase stocks table.
-    - Inserts new tickers with is_active=True
-    - Marks missing tickers as is_active=False
+    Upload current and historical-only tickers to the Supabase stocks table.
+    - Current tickers are stored with is_active=True.
+    - Curated retired tickers are stored with is_active=False.
+    - Tickers absent from the combined fetch are marked inactive.
     Returns (new_count, deactivated_count)
     """
     if not df.empty:
