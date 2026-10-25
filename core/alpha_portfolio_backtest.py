@@ -72,7 +72,9 @@ def _validate_predictions(predictions: pd.DataFrame) -> pd.DataFrame:
     rows = predictions.reset_index().copy()
     rows["date"] = _naive_dates(pd.Index(rows["date"]))
     rows["ticker"] = rows["ticker"].astype(str)
-    rows, excluded_tickers = filter_excluded_ticker_rows(rows)
+    rows, excluded_tickers = filter_excluded_ticker_rows(
+        rows, include_historical_retired=True
+    )
     if excluded_tickers:
         print(
             "Excluding retired/invalid tickers from portfolio predictions: "
