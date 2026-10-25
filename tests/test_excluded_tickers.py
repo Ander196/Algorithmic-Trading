@@ -85,7 +85,7 @@ def test_wbd_is_skipped_before_database_access_by_both_price_loaders():
         assert result["error"] is None
 
 
-def test_excluded_row_filter_removes_wbd_from_csv_analysis():
+def test_excluded_row_filter_keeps_operational_default_and_supports_history_mode():
     import pandas as pd
     from data.excluded_tickers import filter_excluded_ticker_rows
 
@@ -94,3 +94,9 @@ def test_excluded_row_filter_removes_wbd_from_csv_analysis():
 
     assert filtered["ticker"].tolist() == ["AAPL", "MSFT"]
     assert excluded == ("QRVO", "WBD")
+
+    historical, historical_excluded = filter_excluded_ticker_rows(
+        raw, include_historical_retired=True
+    )
+    assert historical["ticker"].tolist() == ["AAPL", "QRVO", "MSFT"]
+    assert historical_excluded == ("WBD",)

@@ -1,16 +1,11 @@
-"""Run the V1 Alpha model evaluation on the configured Supabase universe.
+"""Run the V1 Alpha research evaluation over the full stored price universe.
 
-This job is research-only:
-- universe comes from stocks.is_active = true;
-- adjusted OHLC prices come from stock_prices and are normalized to USD for supported foreign listings;
-- AlphaDatasetBuilder creates point-in-time features/labels on that common price basis;
-- WalkForwardProtocol and AlphaEvaluator produce OOS metrics, including a final partial test fold;
-- no Strategy, RiskManager, execution, or production Top-N selection is performed.
-
-V1 caveat:
-the current active universe is applied to historical data. This is intentionally
-not survivorship-bias-free and must be treated as a research limitation.
+Tickers are discovered from the stocks catalog without filtering on is_active.
+The storage schema declares stock_prices.ticker as a foreign key to stocks, and
+the loader retains only tickers with usable price rows. As a result, retired
+symbols with preserved history can contribute only over their observed dates.
 """
+
 
 from __future__ import annotations
 
@@ -35,9 +30,19 @@ from jobs.export_alpha_adjusted_prices import (
 )
 from dotenv import load_dotenv
 
-from data.excluded_tickers import is_excluded_ticker, normalize_ticker
+from data.excluded_tickers import is_excluded_from_alpha_history, normalize_ticker
 
 load_dotenv(".env.secrets")
+
+
+@dataclass(frozen=True)
+class AlphaTickerCoverage:
+    """Usable observed price interval for one historical Alpha candidate."""
+
+    ticker: str
+    first_price_date: pd.Timestamp
+    last_price_date: pd.Timestamp
+    usable_price_rows: int
 
 
 @dataclass(frozen=True)
@@ -45,6 +50,7 @@ class AlphaLoadSummary:
     requested_tickers: int
     loaded_tickers: int
     failed_tickers: tuple[str, ...]
+    price_coverage: tuple[AlphaTickerCoverage, ...] = ()
 
 
 def _to_ohlcv_frame(data: pd.DataFrame) -> pd.DataFrame:
@@ -161,17 +167,19 @@ def get_alpha_universe(
     client: Client,
     market_ticker: str,
 ) -> list[str]:
-    """Return the configured execution universe, excluding the market benchmark."""
-    response = (
-        client.table("stocks")
-        .select("ticker")
-        .eq("is_active", True)
-        .execute()
-    )
+    """Return historical research candidates, independent of current activity.
+
+    Every stock-price row references stocks.ticker (storage/schema.sql), so
+    reading the full catalog discovers symbols whether active or retired.
+    load_alpha_inputs subsequently keeps only symbols with usable stored prices.
+    Their actual date coverage is derived from those full histories, not from
+    the current stocks.is_active flag.
+    """
+    response = client.table("stocks").select("ticker").execute()
     tickers = {
         normalize_ticker(row["ticker"])
         for row in (response.data or [])
-        if row.get("ticker") and not is_excluded_ticker(row["ticker"])
+        if row.get("ticker") and not is_excluded_from_alpha_history(row["ticker"])
     }
     tickers.discard(market_ticker.upper())
     return sorted(tickers)
@@ -199,13 +207,27 @@ def load_alpha_inputs(
         try:
             stock_data[ticker] = _to_ohlcv_frame(
                 fetch_price_history(
-                    client, ticker, limit=history_limit, include_adj_close=True
+                    client,
+                    ticker,
+                    limit=history_limit,
+                    include_adj_close=True,
+                    allow_historical_retired=True,
                 )
             )
         except Exception as exc:
             failed.append(ticker)
             print(f"WARNING: skipping {ticker}: {exc}")
 
+    coverage = tuple(
+        AlphaTickerCoverage(
+            ticker=ticker,
+            first_price_date=pd.Timestamp(history.index.min()).normalize(),
+            last_price_date=pd.Timestamp(history.index.max()).normalize(),
+            usable_price_rows=len(history),
+        )
+        for ticker, history in sorted(stock_data.items())
+        if not history.empty
+    )
     return (
         stock_data,
         market_data,
@@ -213,6 +235,7 @@ def load_alpha_inputs(
             requested_tickers=len(tickers),
             loaded_tickers=len(stock_data),
             failed_tickers=tuple(failed),
+            price_coverage=coverage,
         ),
     )
 
@@ -341,6 +364,7 @@ def _print_diagnostics(
     random_repeats: int,
     random_seed: int,
     diagnostics_dir: Path | None,
+    universe_coverage: tuple[AlphaTickerCoverage, ...] = (),
 ) -> None:
     """Print out-of-sample baselines and optionally persist audit CSV files."""
     diagnostics = evaluate_alpha_diagnostics(
@@ -379,6 +403,24 @@ def _print_diagnostics(
             diagnostics_dir / "alpha_outlier_sensitivity.csv", index=False
         )
         extremes.to_csv(diagnostics_dir / "alpha_extreme_returns.csv", index=False)
+        coverage_frame = pd.DataFrame(
+            [
+                {
+                    "ticker": item.ticker,
+                    "first_price_date": item.first_price_date.date().isoformat(),
+                    "last_price_date": item.last_price_date.date().isoformat(),
+                    "usable_price_rows": item.usable_price_rows,
+                }
+                for item in universe_coverage
+            ],
+            columns=[
+                "ticker", "first_price_date", "last_price_date", "usable_price_rows"
+            ],
+        )
+        coverage_frame.to_csv(
+            diagnostics_dir / "alpha_universe_coverage.csv", index=False
+        )
+        print(f"Historical universe coverage: {len(coverage_frame)} tickers")
         print(f"Diagnostics written to: {diagnostics_dir.resolve()}")
 
 
@@ -400,7 +442,7 @@ def main() -> None:
         "--max-tickers",
         type=int,
         default=None,
-        help="Optional cap for local/smoke runs; production evaluation uses the full active universe.",
+        help="Optional cap for local/smoke runs; by default evaluation uses all catalog tickers with usable stored history, active or retired.",
     )
     parser.add_argument(
         "--diagnostics-dir",
@@ -447,6 +489,7 @@ def main() -> None:
         random_repeats=args.random_baseline_repeats,
         random_seed=args.random_seed,
         diagnostics_dir=args.diagnostics_dir,
+        universe_coverage=load_summary.price_coverage,
     )
 
 

@@ -8,6 +8,7 @@ from jobs.evaluate_alpha import (
     _print_diagnostics,
     _to_ohlcv_frame,
     get_alpha_universe,
+    load_alpha_inputs,
 )
 import jobs.evaluate_alpha as evaluate_alpha_module
 
@@ -69,18 +70,56 @@ def test_evaluation_end_date_rejects_cutoff_before_dataset() -> None:
         _filter_dataset_by_evaluation_end_date(dataset, "2020-01-01")
 
 
-def test_get_alpha_universe_uses_active_tickers_and_excludes_market() -> None:
+def test_get_alpha_universe_ignores_current_activity_and_excludes_market() -> None:
     client = _FakeClient(
         [
-            {"ticker": "spy"},
-            {"ticker": "AAA"},
-            {"ticker": "bbb"},
-            {"ticker": "AAA"},
-            {"ticker": None},
+            {"ticker": "spy", "is_active": True},
+            {"ticker": "AAA", "is_active": True},
+            {"ticker": "bbb", "is_active": False},
+            {"ticker": "QRVO", "is_active": False},
+            {"ticker": "ULVR.L", "is_active": False},
+            {"ticker": "AAA", "is_active": True},
+            {"ticker": None, "is_active": False},
         ]
     )
 
-    assert get_alpha_universe(client, "SPY") == ["AAA", "BBB"]
+    # Current activity is irrelevant to historical eligibility. QRVO's valid
+    # stored history is retained, while known unusable histories stay excluded.
+    assert get_alpha_universe(client, "SPY") == ["AAA", "BBB", "QRVO"]
+
+
+def test_load_alpha_inputs_records_first_and_last_usable_price_dates(monkeypatch) -> None:
+    dates = pd.bdate_range("2020-01-02", periods=3)
+    raw = pd.DataFrame(
+        {
+            "price_date": dates,
+            "open": [99.0, 100.0, 101.0],
+            "high": [102.0, 103.0, 104.0],
+            "low": [98.0, 99.0, 100.0],
+            "close": [100.0, 101.0, 102.0],
+            "adj_close": [100.0, 101.0, 102.0],
+            "volume": [1000, 1100, 1200],
+        }
+    )
+    calls = []
+
+    def fake_fetch(_client, ticker, *, limit, include_adj_close, allow_historical_retired=False):
+        calls.append((ticker, limit, include_adj_close, allow_historical_retired))
+        return raw.copy()
+
+    monkeypatch.setattr(evaluate_alpha_module, "fetch_price_history", fake_fetch)
+
+    stock_data, _market_data, summary = load_alpha_inputs(
+        object(), ["QRVO"], "SPY", history_limit=None
+    )
+
+    assert set(stock_data) == {"QRVO"}
+    assert summary.loaded_tickers == 1
+    assert summary.price_coverage[0].ticker == "QRVO"
+    assert summary.price_coverage[0].first_price_date == dates[0]
+    assert summary.price_coverage[0].last_price_date == dates[-1]
+    assert summary.price_coverage[0].usable_price_rows == 3
+    assert ("QRVO", None, True, True) in calls
 
 
 def test_to_ohlcv_frame_normalizes_datetime_and_columns() -> None:
@@ -239,5 +278,6 @@ def test_print_diagnostics_writes_reviewable_csv_files(tmp_path) -> None:
         "alpha_ranking_comparison.csv",
         "alpha_outlier_sensitivity.csv",
         "alpha_extreme_returns.csv",
+        "alpha_universe_coverage.csv",
     }
     assert expected_files.issubset({path.name for path in tmp_path.iterdir()})

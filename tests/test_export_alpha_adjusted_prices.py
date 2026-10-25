@@ -371,9 +371,9 @@ def test_export_prices_excludes_wbd_before_fetching_supabase_history(monkeypatch
     predictions_path = tmp_path / "predictions.csv"
     output_path = tmp_path / "prices.csv"
     pd.DataFrame({
-        "date": [dates[65], dates[65], dates[66]],
-        "ticker": ["AAPL", "WBD", "AAPL"],
-        "expected_excess_return": [0.01, 0.99, 0.02],
+        "date": [dates[65], dates[65], dates[65], dates[66]],
+        "ticker": ["AAPL", "WBD", "QRVO", "AAPL"],
+        "expected_excess_return": [0.01, 0.99, 1.50, 0.02],
     }).to_csv(predictions_path, index=False)
 
     export_job.export_prices(
@@ -384,5 +384,6 @@ def test_export_prices_excludes_wbd_before_fetching_supabase_history(monkeypatch
     )
 
     result = pd.read_csv(output_path)
-    assert set(requested) == {"AAPL", "SPY"}
+    assert set(requested) == {"AAPL", "QRVO", "SPY"}
     assert "WBD" not in set(result["ticker"])
+    assert "QRVO" in set(result["ticker"])

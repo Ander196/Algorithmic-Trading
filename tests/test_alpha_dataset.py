@@ -67,8 +67,19 @@ def test_dataset_builder_excludes_retired_wbd_ticker():
     market = _bars(2)
     dataset = AlphaDatasetBuilder(
         AlphaDatasetConfig(min_history=252, horizon_days=5)
-    ).build({"AAA": stock, "WBD": stock, "BBB": _bars(3)}, market)
+    ).build(
+        {
+            "AAA": stock,
+            "WBD": stock,
+            "QRVO": _bars(4, periods=280),
+            "BBB": _bars(3),
+        },
+        market,
+    )
 
     tickers = set(dataset.index.get_level_values("ticker"))
-    assert tickers == {"AAA", "BBB"}
+    assert tickers == {"AAA", "BBB", "QRVO"}
     assert "WBD" not in tickers
+    # A retained delisted symbol contributes only within its stored history.
+    qrvo_dates = dataset.xs("QRVO", level="ticker").index
+    assert qrvo_dates.max() < _bars(4, periods=280).index.max()

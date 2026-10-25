@@ -103,13 +103,27 @@ def test_fetch_price_history_rejects_non_positive_limit(limit):
         fetch_price_history(_FakeClient(_rows(1)), "AAPL", limit=limit)
 
 
-def test_fetch_price_history_rejects_excluded_tickers_before_querying():
+def test_fetch_price_history_rejects_known_invalid_history_before_querying():
     client = _FakeClient(_rows(5))
 
     with pytest.raises(RuntimeError, match="ABI.BR is excluded"):
         fetch_price_history(client, " abi.br ", limit=None)
 
     assert client.ranges == []
+
+
+def test_fetch_price_history_can_read_preserved_retired_history_for_research():
+    client = _FakeClient(_rows(5))
+
+    frame = fetch_price_history(
+        client,
+        "qrvo",
+        limit=None,
+        allow_historical_retired=True,
+    )
+
+    assert len(frame) == 5
+    assert frame["price_date"].is_monotonic_increasing
 
 def test_invalid_price_history_logs_reasons_as_supabase_read(caplog):
     rows = _rows(5)
