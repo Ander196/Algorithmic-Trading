@@ -36,10 +36,21 @@ load_dotenv(".env.secrets")
 
 
 @dataclass(frozen=True)
+class AlphaTickerCoverage:
+    """Usable observed price interval for one historical Alpha candidate."""
+
+    ticker: str
+    first_price_date: pd.Timestamp
+    last_price_date: pd.Timestamp
+    usable_price_rows: int
+
+
+@dataclass(frozen=True)
 class AlphaLoadSummary:
     requested_tickers: int
     loaded_tickers: int
     failed_tickers: tuple[str, ...]
+    price_coverage: tuple[AlphaTickerCoverage, ...] = ()
 
 
 def _to_ohlcv_frame(data: pd.DataFrame) -> pd.DataFrame:
@@ -207,6 +218,16 @@ def load_alpha_inputs(
             failed.append(ticker)
             print(f"WARNING: skipping {ticker}: {exc}")
 
+    coverage = tuple(
+        AlphaTickerCoverage(
+            ticker=ticker,
+            first_price_date=pd.Timestamp(history.index.min()).normalize(),
+            last_price_date=pd.Timestamp(history.index.max()).normalize(),
+            usable_price_rows=len(history),
+        )
+        for ticker, history in sorted(stock_data.items())
+        if not history.empty
+    )
     return (
         stock_data,
         market_data,
@@ -214,6 +235,7 @@ def load_alpha_inputs(
             requested_tickers=len(tickers),
             loaded_tickers=len(stock_data),
             failed_tickers=tuple(failed),
+            price_coverage=coverage,
         ),
     )
 
@@ -342,6 +364,7 @@ def _print_diagnostics(
     random_repeats: int,
     random_seed: int,
     diagnostics_dir: Path | None,
+    universe_coverage: tuple[AlphaTickerCoverage, ...] = (),
 ) -> None:
     """Print out-of-sample baselines and optionally persist audit CSV files."""
     diagnostics = evaluate_alpha_diagnostics(
@@ -380,6 +403,24 @@ def _print_diagnostics(
             diagnostics_dir / "alpha_outlier_sensitivity.csv", index=False
         )
         extremes.to_csv(diagnostics_dir / "alpha_extreme_returns.csv", index=False)
+        coverage_frame = pd.DataFrame(
+            [
+                {
+                    "ticker": item.ticker,
+                    "first_price_date": item.first_price_date.date().isoformat(),
+                    "last_price_date": item.last_price_date.date().isoformat(),
+                    "usable_price_rows": item.usable_price_rows,
+                }
+                for item in universe_coverage
+            ],
+            columns=[
+                "ticker", "first_price_date", "last_price_date", "usable_price_rows"
+            ],
+        )
+        coverage_frame.to_csv(
+            diagnostics_dir / "alpha_universe_coverage.csv", index=False
+        )
+        print(f"Historical universe coverage: {len(coverage_frame)} tickers")
         print(f"Diagnostics written to: {diagnostics_dir.resolve()}")
 
 
@@ -448,6 +489,7 @@ def main() -> None:
         random_repeats=args.random_baseline_repeats,
         random_seed=args.random_seed,
         diagnostics_dir=args.diagnostics_dir,
+        universe_coverage=load_summary.price_coverage,
     )
 
 
