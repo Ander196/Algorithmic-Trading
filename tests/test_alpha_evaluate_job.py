@@ -69,18 +69,22 @@ def test_evaluation_end_date_rejects_cutoff_before_dataset() -> None:
         _filter_dataset_by_evaluation_end_date(dataset, "2020-01-01")
 
 
-def test_get_alpha_universe_uses_active_tickers_and_excludes_market() -> None:
+def test_get_alpha_universe_ignores_current_activity_and_excludes_market() -> None:
     client = _FakeClient(
         [
-            {"ticker": "spy"},
-            {"ticker": "AAA"},
-            {"ticker": "bbb"},
-            {"ticker": "AAA"},
-            {"ticker": None},
+            {"ticker": "spy", "is_active": True},
+            {"ticker": "AAA", "is_active": True},
+            {"ticker": "bbb", "is_active": False},
+            {"ticker": "QRVO", "is_active": False},
+            {"ticker": "ULVR.L", "is_active": False},
+            {"ticker": "AAA", "is_active": True},
+            {"ticker": None, "is_active": False},
         ]
     )
 
-    assert get_alpha_universe(client, "SPY") == ["AAA", "BBB"]
+    # Current activity is irrelevant to historical eligibility. QRVO's valid
+    # stored history is retained, while known unusable histories stay excluded.
+    assert get_alpha_universe(client, "SPY") == ["AAA", "BBB", "QRVO"]
 
 
 def test_to_ohlcv_frame_normalizes_datetime_and_columns() -> None:
