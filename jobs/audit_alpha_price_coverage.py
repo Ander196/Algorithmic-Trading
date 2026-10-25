@@ -61,7 +61,9 @@ def _read_predictions(path: Path) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[
     rows["ticker"] = rows["ticker"].astype(str).str.strip().str.upper()
     if (rows["ticker"] == "").any():
         raise ValueError("predictions CSV contains empty ticker values")
-    rows, excluded_tickers = filter_excluded_ticker_rows(rows)
+    rows, excluded_tickers = filter_excluded_ticker_rows(
+        rows, include_historical_retired=True
+    )
     if excluded_tickers:
         print(
             "Excluding retired/invalid tickers from coverage audit: "
