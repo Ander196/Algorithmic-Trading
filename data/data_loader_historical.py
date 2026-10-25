@@ -1,8 +1,8 @@
 """
-Historical OHLCV loader for all active tickers.
+Historical OHLCV loader for active and curated retired tickers.
 
 The loader:
-- reads active tickers from the Supabase stocks table;
+- reads active tickers and registered historical-only symbols from stocks;
 - preserves existing history in stock_prices;
 - backfills from 2000-01-01 where history is missing;
 - fetches recent data from the latest stored date through today;
@@ -25,6 +25,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 
 from data.excluded_tickers import is_excluded_ticker, normalize_ticker
+from data.retired_tickers import RETIRED_TICKERS
 from data.price_validation import validate_ohlcv_frame
 
 load_dotenv(".env.secrets")
@@ -49,18 +50,30 @@ def getSupabaseClient() -> supabase.Client:
 
 
 def getActiveTickers(client: supabase.Client) -> list[str]:
-    """Fetch all active tickers from stocks table."""
-    response = (
-        client.table("stocks")
-        .select("ticker")
-        .eq("is_active", True)
-        .execute()
-    )
-    return [
-        normalize_ticker(row["ticker"])
-        for row in (response.data or [])
-        if row.get("ticker") and not is_excluded_ticker(row["ticker"])
-    ]
+    """Fetch active tickers plus registered retired symbols for history backfills.
+
+    Retired symbols remain inactive in the live catalog. Include them only when
+    ticker_loader has registered them after confirming Yahoo history, so price
+    inserts continue to satisfy the stocks foreign-key constraint.
+    """
+    response = client.table("stocks").select("ticker, is_active").execute()
+    tickers = []
+    seen = set()
+
+    for row in (response.data or []):
+        raw_ticker = row.get("ticker")
+        if not raw_ticker:
+            continue
+        ticker = normalize_ticker(raw_ticker)
+        historical_only = ticker in RETIRED_TICKERS
+        if not row.get("is_active", False) and not historical_only:
+            continue
+        if is_excluded_ticker(ticker) or ticker in seen:
+            continue
+        tickers.append(ticker)
+        seen.add(ticker)
+
+    return tickers
 
 
 def getLatestPriceDate(
@@ -354,7 +367,7 @@ def processTicker(
 
 
 def main() -> None:
-    """Load maximum available history for every active ticker."""
+    """Load maximum available history for active and registered retired tickers."""
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -378,7 +391,7 @@ def main() -> None:
 
     client = getSupabaseClient()
     tickers = getActiveTickers(client)
-    print(f"Found {len(tickers)} active tickers in stocks table\n")
+    print(f"Found {len(tickers)} eligible tickers (active plus registered retired)\n")
 
     totalInserted = 0
     totalFetched = 0

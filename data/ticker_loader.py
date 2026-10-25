@@ -22,6 +22,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 
 from data.excluded_tickers import EXCLUDED_TICKERS, is_excluded_ticker, normalize_ticker
+from data.retired_tickers import RETIRED_TICKERS
 
 load_dotenv(".env.secrets")
 
@@ -144,7 +145,13 @@ def fetchTickerInfo(ticker: str, retries: int = 2) -> dict | None:
 
 def fetchAllTickers(tickers: list[str], batchSize: int = 50, delay: float = 0.5) -> pd.DataFrame:
     """Fetch non-excluded ticker info with batching and rate limiting."""
-    tickers = [normalize_ticker(t) for t in tickers if t and not is_excluded_ticker(t)]
+    tickers = [
+        normalize_ticker(t)
+        for t in tickers
+        if t
+        and not is_excluded_ticker(t)
+        and normalize_ticker(t) not in RETIRED_TICKERS
+    ]
     results = []
     total = len(tickers)
 
@@ -169,6 +176,47 @@ def fetchAllTickers(tickers: list[str], batchSize: int = 50, delay: float = 0.5)
     return df
 
 
+def fetchRetiredTickerInfo() -> pd.DataFrame:
+    """Register retired symbols only when Yahoo Finance returns price history.
+
+    Delisted symbols often no longer expose usable quote metadata through the
+    info endpoint. Their static descriptive fields are curated in
+    data.retired_tickers and verified against the history endpoint instead.
+    The returned rows are explicitly historical-only and must remain inactive.
+    """
+    results = []
+    tickers = list(RETIRED_TICKERS)
+    print(f"\nChecking Yahoo Finance history for {len(tickers)} retired tickers...")
+
+    for ticker in tickers:
+        try:
+            history = yf.Ticker(ticker).history(
+                period="max",
+                auto_adjust=False,
+                actions=False,
+            )
+            if history is None or history.empty:
+                print(f"  {ticker}: no Yahoo Finance history; not registering")
+                continue
+
+            results.append({
+                "ticker": ticker,
+                **RETIRED_TICKERS[ticker],
+                "historical_only": True,
+            })
+            first_date = history.index.min().date()
+            last_date = history.index.max().date()
+            print(
+                f"  {ticker}: {len(history)} Yahoo rows "
+                f"({first_date} to {last_date}); historical-only"
+            )
+        except Exception as exc:
+            print(f"  {ticker}: Yahoo history check failed; not registering ({exc})")
+        time.sleep(0.3)
+
+    return pd.DataFrame(results)
+
+
 def getExistingTickers(client: supabase.Client) -> set[str]:
     """Get set of tickers already in database."""
     response = client.table("stocks").select("ticker, is_active, created_at").execute()
@@ -182,9 +230,10 @@ def getNowTimestamptz() -> str:
 
 def uploadToSupabase(df: pd.DataFrame, client: supabase.Client) -> tuple[int, int]:
     """
-    Upload tickers to Supabase stocks table.
-    - Inserts new tickers with is_active=True
-    - Marks missing tickers as is_active=False
+    Upload current and historical-only tickers to the Supabase stocks table.
+    - Current tickers are stored with is_active=True.
+    - Curated retired tickers are stored with is_active=False.
+    - Tickers absent from the combined fetch are marked inactive.
     Returns (new_count, deactivated_count)
     """
     if not df.empty:
@@ -215,11 +264,19 @@ def uploadToSupabase(df: pd.DataFrame, client: supabase.Client) -> tuple[int, in
     records = []
     for _, row in df.iterrows():
         ticker = row["ticker"]
-        records.append({
+        historical_flag = row.get("historical_only", False)
+        historical_only = bool(historical_flag) if pd.notna(historical_flag) else False
+        record = {
             "ticker": ticker, "name": row["name"], "exchange": row["exchange"],
             "sector": row["sector"], "industry": row["industry"],
-            "is_active": True, "created_at": now,
-        })
+            "is_active": not historical_only,
+        }
+        # Avoid refreshing the live-universe run marker for historical-only
+        # rows. Omitted created_at preserves existing timestamps on upsert;
+        # new rows receive the database default.
+        if not historical_only:
+            record["created_at"] = now
+        records.append(record)
         if ticker not in existingTickers:
             newCount += 1
 
@@ -259,14 +316,22 @@ def main() -> None:
         "ticker", sorted(EXCLUDED_TICKERS)
     ).execute()
 
-    # Fetch ticker info
-    df = fetchAllTickers(ALL_TICKERS)
+    # Fetch the current universe and a separate, verified historical-only
+    # catalog. Retired symbols remain inactive but are available for backfills.
+    live_df = fetchAllTickers(ALL_TICKERS)
+    retired_df = fetchRetiredTickerInfo()
+    df = pd.concat([live_df, retired_df], ignore_index=True)
 
     if df.empty:
-        print("No tickers fetched, nothing to upload")
+        print("No current or historical tickers fetched, nothing to upload")
         return
 
-    # Upload to Supabase
+    print(
+        f"Prepared {len(live_df)} current tickers and "
+        f"{len(retired_df)} retired tickers with available history"
+    )
+
+    # Upload current symbols as active and retired symbols as inactive.
     newCount, deactivatedCount = uploadToSupabase(df, client)
 
     print(f"\nDone! New: {newCount}, Deactivated: {deactivatedCount}")
