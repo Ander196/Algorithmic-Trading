@@ -135,12 +135,18 @@ def test_backtest_excludes_wbd_even_if_present_in_prediction_csv() -> None:
     extra["ticker"] = "WBD"
     extra["expected_excess_return"] = 1000.0
     extra = extra.set_index(["date", "ticker"])
-    predictions = pd.concat([predictions, extra]).sort_index()
+    retired = predictions.reset_index()[["date"]].drop_duplicates().copy()
+    retired["ticker"] = "QRVO"
+    retired["expected_excess_return"] = 900.0
+    retired = retired.set_index(["date", "ticker"])
+    predictions = pd.concat([predictions, extra, retired]).sort_index()
     prices["WBD"] = 10.0
+    prices["QRVO"] = 25.0 * np.exp(0.00015 * np.arange(len(prices)))
 
     report = run_alpha_portfolio_backtest(predictions, prices)
 
     assert "WBD" not in set(report.holdings["ticker"])
+    assert "QRVO" in set(report.holdings["ticker"])
 
 
 def test_backtest_rejects_duplicate_prediction_keys() -> None:
