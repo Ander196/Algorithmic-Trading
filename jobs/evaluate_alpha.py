@@ -1,16 +1,11 @@
-"""Run the V1 Alpha model evaluation on the configured Supabase universe.
+"""Run the V1 Alpha research evaluation over the full stored price universe.
 
-This job is research-only:
-- universe comes from stocks.is_active = true;
-- adjusted OHLC prices come from stock_prices and are normalized to USD for supported foreign listings;
-- AlphaDatasetBuilder creates point-in-time features/labels on that common price basis;
-- WalkForwardProtocol and AlphaEvaluator produce OOS metrics, including a final partial test fold;
-- no Strategy, RiskManager, execution, or production Top-N selection is performed.
-
-V1 caveat:
-the current active universe is applied to historical data. This is intentionally
-not survivorship-bias-free and must be treated as a research limitation.
+Tickers are discovered from the stocks catalog without filtering on is_active.
+The storage schema declares stock_prices.ticker as a foreign key to stocks, and
+the loader retains only tickers with usable price rows. As a result, retired
+symbols with preserved history can contribute only over their observed dates.
 """
+
 
 from __future__ import annotations
 
@@ -35,7 +30,7 @@ from jobs.export_alpha_adjusted_prices import (
 )
 from dotenv import load_dotenv
 
-from data.excluded_tickers import is_excluded_ticker, normalize_ticker
+from data.excluded_tickers import is_excluded_from_alpha_history, normalize_ticker
 
 load_dotenv(".env.secrets")
 
@@ -161,17 +156,19 @@ def get_alpha_universe(
     client: Client,
     market_ticker: str,
 ) -> list[str]:
-    """Return the configured execution universe, excluding the market benchmark."""
-    response = (
-        client.table("stocks")
-        .select("ticker")
-        .eq("is_active", True)
-        .execute()
-    )
+    """Return historical research candidates, independent of current activity.
+
+    Every stock-price row references stocks.ticker (storage/schema.sql), so
+    reading the full catalog discovers symbols whether active or retired.
+    load_alpha_inputs subsequently keeps only symbols with usable stored prices.
+    Their actual date coverage is derived from those full histories, not from
+    the current stocks.is_active flag.
+    """
+    response = client.table("stocks").select("ticker").execute()
     tickers = {
         normalize_ticker(row["ticker"])
         for row in (response.data or [])
-        if row.get("ticker") and not is_excluded_ticker(row["ticker"])
+        if row.get("ticker") and not is_excluded_from_alpha_history(row["ticker"])
     }
     tickers.discard(market_ticker.upper())
     return sorted(tickers)
@@ -400,7 +397,7 @@ def main() -> None:
         "--max-tickers",
         type=int,
         default=None,
-        help="Optional cap for local/smoke runs; production evaluation uses the full active universe.",
+        help="Optional cap for local/smoke runs; by default evaluation uses all catalog tickers with usable stored history, active or retired.",
     )
     parser.add_argument(
         "--diagnostics-dir",
