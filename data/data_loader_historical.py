@@ -1,8 +1,8 @@
 """
-Historical OHLCV loader for all active tickers.
+Historical OHLCV loader for active and curated retired tickers.
 
 The loader:
-- reads active tickers from the Supabase stocks table;
+- reads active tickers and registered historical-only symbols from stocks;
 - preserves existing history in stock_prices;
 - backfills from 2000-01-01 where history is missing;
 - fetches recent data from the latest stored date through today;
@@ -367,7 +367,7 @@ def processTicker(
 
 
 def main() -> None:
-    """Load maximum available history for every active ticker."""
+    """Load maximum available history for active and registered retired tickers."""
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -391,7 +391,7 @@ def main() -> None:
 
     client = getSupabaseClient()
     tickers = getActiveTickers(client)
-    print(f"Found {len(tickers)} active tickers in stocks table\n")
+    print(f"Found {len(tickers)} eligible tickers (active plus registered retired)\n")
 
     totalInserted = 0
     totalFetched = 0
