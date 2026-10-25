@@ -196,7 +196,11 @@ def load_alpha_inputs(
         try:
             stock_data[ticker] = _to_ohlcv_frame(
                 fetch_price_history(
-                    client, ticker, limit=history_limit, include_adj_close=True
+                    client,
+                    ticker,
+                    limit=history_limit,
+                    include_adj_close=True,
+                    allow_historical_retired=True,
                 )
             )
         except Exception as exc:
