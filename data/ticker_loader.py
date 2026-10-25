@@ -263,7 +263,8 @@ def uploadToSupabase(df: pd.DataFrame, client: supabase.Client) -> tuple[int, in
     records = []
     for _, row in df.iterrows():
         ticker = row["ticker"]
-        historical_only = bool(row.get("historical_only", False))
+        historical_flag = row.get("historical_only", False)
+        historical_only = bool(historical_flag) if pd.notna(historical_flag) else False
         record = {
             "ticker": ticker, "name": row["name"], "exchange": row["exchange"],
             "sector": row["sector"], "industry": row["industry"],
