@@ -19,7 +19,7 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
-from data.excluded_tickers import is_excluded_ticker, normalize_ticker
+from data.excluded_tickers import is_excluded_from_alpha_history, normalize_ticker
 
 
 DEFAULT_FEATURE_COLUMNS: tuple[str, ...] = (
@@ -70,7 +70,7 @@ class AlphaDatasetBuilder:
             if not ticker:
                 raise ValueError("ticker names must not be empty")
             ticker = normalize_ticker(ticker)
-            if is_excluded_ticker(ticker):
+            if is_excluded_from_alpha_history(ticker):
                 continue
             stock = self._prepare_frame(raw_data, ticker)
             if len(stock) < self.config.min_history + self.config.horizon_days:
