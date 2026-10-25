@@ -89,3 +89,53 @@ def test_historical_loader_includes_registered_retired_symbols(monkeypatch):
     )
 
     assert historical_loader.getActiveTickers(FakeClient()) == ["AAPL", "SPLK"]
+
+
+
+def test_upload_keeps_retired_tickers_inactive(monkeypatch):
+    class FakeQuery:
+        def __init__(self, client):
+            self.client = client
+
+        def select(self, *_args):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=self.client.existing_rows)
+
+        def upsert(self, records, on_conflict=None):
+            self.client.upserted_records = records
+            return self
+
+    class FakeClient:
+        def __init__(self):
+            self.existing_rows = [{"ticker": "AAPL", "is_active": True}]
+            self.upserted_records = []
+
+        def table(self, name):
+            assert name == "stocks"
+            return FakeQuery(self)
+
+    client = FakeClient()
+    df = pd.DataFrame([
+        {
+            "ticker": "AAPL",
+            "name": "Apple Inc.",
+            "exchange": "NMS",
+            "sector": "Technology",
+            "industry": "Consumer Electronics",
+        },
+        {
+            "ticker": "SPLK",
+            **RETIRED_TICKERS["SPLK"],
+            "historical_only": True,
+        },
+    ])
+
+    ticker_loader.uploadToSupabase(df, client)
+
+    records = {record["ticker"]: record for record in client.upserted_records}
+    assert records["AAPL"]["is_active"] is True
+    assert "created_at" in records["AAPL"]
+    assert records["SPLK"]["is_active"] is False
+    assert "created_at" not in records["SPLK"]
