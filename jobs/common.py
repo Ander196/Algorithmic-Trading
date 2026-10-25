@@ -41,7 +41,9 @@ def fetch_price_history(
     jobs. Pass ``limit=None`` to fetch every available row. An explicit positive
     limit caps the result to the most recent observations. Results are returned
     chronologically for rolling features and models. Alpha evaluation can set
-    ``include_adj_close=True`` to reconstruct adjusted OHLC prices consistently.
+    include_adj_close=True to reconstruct adjusted OHLC prices consistently and
+    allow_historical_retired=True to read preserved delisted-symbol history for
+    research without permitting that symbol in live ingestion or selection.
     """
     ticker = normalize_ticker(ticker)
     if is_excluded_ticker(ticker) and not (
