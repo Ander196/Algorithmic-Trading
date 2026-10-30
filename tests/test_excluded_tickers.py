@@ -1,102 +1,67 @@
-from data.excluded_tickers import EXCLUDED_TICKERS, is_excluded_ticker, normalize_ticker
+from data.excluded_tickers import (
+    EXCLUDED_TICKERS,
+    is_excluded_ticker,
+    normalize_ticker,
+    filter_excluded_ticker_rows,
+)
 from data.data_loader import processTicker as process_incremental_ticker
 from data.data_loader_historical import processTicker as process_historical_ticker
-from data import ticker_loader
+from data.sp500_universe import get_sp500_tickers, get_sp500_membership_periods
 
 
-def test_exclusion_list_contains_invalid_and_deliberately_retired_tickers():
-    expected = {
-        "ABI.BR", "ACA.PA", "ITX.MC", "UCG.MI",
-        "AZN.L", "BATS.L", "BP.L", "BT-A.L", "GSK.L", "HSBA.L",
-        "LSEG.L", "NG.L", "PRU.L", "REL.L", "RIO.L", "SHEL.L",
-        "ULVR.L", "VOD.L", "WBD", "QRVO",
-    }
-    assert EXCLUDED_TICKERS == frozenset(expected)
+EUROPEAN_TICKERS = {
+    "ABI.BR", "ACA.PA", "ITX.MC", "UCG.MI",
+    "AZN.L", "BATS.L", "BP.L", "BT-A.L", "GSK.L", "HSBA.L",
+    "LSEG.L", "NG.L", "PRU.L", "REL.L", "RIO.L", "SHEL.L",
+    "ULVR.L", "VOD.L",
+}
 
 
-def test_qrvo_is_retired_from_static_catalog_and_both_price_loaders():
-    assert "QRVO" not in ticker_loader.US_TICKERS
+def test_exclusion_list_is_limited_to_deliberately_unsupported_european_symbols():
+    assert EXCLUDED_TICKERS == frozenset(EUROPEAN_TICKERS)
 
-    for loader in (process_incremental_ticker, process_historical_ticker):
-        result = loader(client=object(), ticker=" qrvo ")
-        assert result["skipped"] == 1
-        assert result["fetched"] == 0
-        assert result["inserted"] == 0
-        assert result["error"] is None
+
+def test_historical_sp500_symbols_qrvo_and_wbd_are_not_excluded():
+    historical_universe = set(get_sp500_tickers())
+    assert "QRVO" in historical_universe
+    assert "WBD" in historical_universe
+    assert get_sp500_membership_periods("QRVO")
+    assert get_sp500_membership_periods("WBD")
+    assert not is_excluded_ticker("QRVO")
+    assert not is_excluded_ticker("WBD")
 
 
 def test_ticker_normalization_is_whitespace_and_case_safe():
     assert normalize_ticker(" abi.br ") == "ABI.BR"
     assert is_excluded_ticker(" abi.br ")
     assert not is_excluded_ticker("AAPL")
-    assert is_excluded_ticker(" wbd ")
+    assert not is_excluded_ticker("WBD")
 
 
-def test_incremental_loader_skips_excluded_ticker_before_database_access():
-    result = process_incremental_ticker(client=object(), ticker=" abi.br ")
-
+def test_incremental_loader_skips_non_sp500_ticker_before_database_access():
+    result = process_incremental_ticker(client=object(), ticker=" ulvr.l ")
     assert result["skipped"] == 1
     assert result["fetched"] == 0
     assert result["inserted"] == 0
     assert result["error"] is None
 
 
-def test_historical_loader_skips_excluded_ticker_before_database_access():
-    result = process_historical_ticker(client=object(), ticker=" abi.br ")
-
+def test_historical_loader_skips_non_sp500_ticker_before_database_access():
+    result = process_historical_ticker(client=object(), ticker=" ulvr.l ")
     assert result["skipped"] == 1
     assert result["fetched"] == 0
     assert result["inserted"] == 0
     assert result["error"] is None
 
-def test_ticker_catalog_fetch_filters_excluded_symbols(monkeypatch):
-    looked_up = []
 
-    def fake_fetch(ticker):
-        looked_up.append(ticker)
-        return {
-            "ticker": ticker,
-            "name": ticker,
-            "exchange": "TEST",
-            "sector": "TEST",
-            "industry": "TEST",
-        }
-
-    monkeypatch.setattr(ticker_loader, "fetchTickerInfo", fake_fetch)
-
-    frame = ticker_loader.fetchAllTickers(
-        [" abi.br ", "AAPL", "ULVR.L", "WBD"],
-        batchSize=50,
-        delay=0,
-    )
-
-    assert looked_up == ["AAPL"]
-    assert frame["ticker"].tolist() == ["AAPL"]
-    assert "WBD" not in ticker_loader.US_TICKERS
-
-
-
-def test_wbd_is_skipped_before_database_access_by_both_price_loaders():
-    for loader in (process_incremental_ticker, process_historical_ticker):
-        result = loader(client=object(), ticker=" wbd ")
-        assert result["skipped"] == 1
-        assert result["fetched"] == 0
-        assert result["inserted"] == 0
-        assert result["error"] is None
-
-
-def test_excluded_row_filter_keeps_operational_default_and_supports_history_mode():
+def test_excluded_row_filter_does_not_remove_valid_historical_sp500_symbols():
     import pandas as pd
-    from data.excluded_tickers import filter_excluded_ticker_rows
 
-    raw = pd.DataFrame({"ticker": ["aapl", " WBD ", " qrvo ", "MSFT"], "score": [1, 2, 3, 4]})
+    raw = pd.DataFrame({
+        "ticker": ["aapl", " WBD ", " qrvo ", "ULVR.L", "MSFT"],
+        "score": [1, 2, 3, 4, 5],
+    })
     filtered, excluded = filter_excluded_ticker_rows(raw)
 
-    assert filtered["ticker"].tolist() == ["AAPL", "MSFT"]
-    assert excluded == ("QRVO", "WBD")
-
-    historical, historical_excluded = filter_excluded_ticker_rows(
-        raw, include_historical_retired=True
-    )
-    assert historical["ticker"].tolist() == ["AAPL", "QRVO", "MSFT"]
-    assert historical_excluded == ("WBD",)
+    assert filtered["ticker"].tolist() == ["AAPL", "WBD", "QRVO", "MSFT"]
+    assert excluded == ("ULVR.L",)
