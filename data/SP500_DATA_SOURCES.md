@@ -21,6 +21,10 @@ Both upstream repositories publish these source files under the MIT License.
 Their attribution and full license texts are retained in `SP500_DATA_SOURCE_LICENSE.txt`
 and `SP500_CHANGE_SOURCE_LICENSE.txt`.
 
+For the curated retired symbols in `retired_tickers.py`, the last actual trading
+session is applied as an additional limit when it precedes the index removal date.
+This is relevant for halted securities such as SBNY.
+
 This is a maintained research dataset, not an official S&P Dow Jones Indices feed.
 Ticker identity changes, special share classes and implementation dates must be
 reviewed before production use. The file controls what this project attempts to
