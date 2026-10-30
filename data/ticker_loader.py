@@ -73,7 +73,7 @@ US_TICKERS = [
 
 # European stocks (major exchanges)
 EU_TICKERS = [
-    # UK (LSE)
+    '''# UK (LSE)
     "SHEL.L", "HSBA.L", "AZN.L", "ULVR.L", "BP.L", "GSK.L", "RIO.L", "BATS.L",
     "REL.L", "NVO.L", "VOD.L", "LSEG.L", "NG.L", "BT-A.L", " SSE.L", "PRU.L",
     # Germany (XETRA)
@@ -109,7 +109,7 @@ EU_TICKERS = [
     # Poland (Warsaw Stock Exchange)
     "PKN.PW", "PKO.PW", "PEO.PW", "PZU.PW", "KGH.PW", "CDR.PW", "ALE.PW",
     # Czech (Prague Stock Exchange)
-    "CEZ.PR", "KOMB.PR", "MONET.PR", "ERBA.PR",
+    "CEZ.PR", "KOMB.PR", "MONET.PR", "ERBA.PR",'''
 ]
 
 # Combined ticker lists
