@@ -30,7 +30,7 @@ from data.sp500_universe import (
     SP500_BENCHMARK_TICKER,
     SP500_HISTORY_START,
     filter_sp500_price_rows,
-    get_sp500_membership_periods,
+    get_sp500_price_periods,
     get_sp500_tickers,
     get_yfinance_symbol,
 )
@@ -280,7 +280,7 @@ def processTicker(
             end_date_exclusive=None,
         ),)
     else:
-        periods = get_sp500_membership_periods(ticker)
+        periods = get_sp500_price_periods(ticker)
 
     if not periods:
         result["skipped"] = 1
