@@ -141,7 +141,7 @@ def uploadToSupabase(
     df: pd.DataFrame,
     client: supabase.Client,
 ) -> tuple[int, int]:
-    """Upload current and historical-only catalog rows without resetting history."""
+    """Upsert current members; keep former members registered and inactive."""
     required = {"ticker", "name", "exchange", "sector", "industry", "historical_only"}
     missing = required - set(df.columns)
     if missing:
@@ -149,7 +149,8 @@ def uploadToSupabase(
 
     existing = getExistingTickers(client)
     now = getNowTimestamptz()
-    current_records = []
+    current_existing = []
+    current_new = []
     historical_existing = []
     historical_new = []
     seen = set()
@@ -175,22 +176,29 @@ def uploadToSupabase(
                 historical_existing.append(record)
             else:
                 historical_new.append(record)
+        elif ticker in existing:
+            # Existing rows retain their original created_at timestamp.
+            current_existing.append(record)
         else:
-            # Preserve the established current-catalog refresh semantics.
             record["created_at"] = now
-            current_records.append(record)
+            current_new.append(record)
 
-    if current_records:
-        client.table("stocks").upsert(
-            current_records, on_conflict="ticker"
-        ).execute()
-        print(f"  Upserted {len(current_records)} current constituents/benchmark")
+    if current_existing:
+        for record in current_existing:
+            client.table("stocks").update(record).eq(
+                "ticker", record["ticker"]
+            ).execute()
+        print(f"  Updated {len(current_existing)} existing current constituents/benchmark")
 
-    for record in historical_existing:
-        client.table("stocks").update(record).eq(
-            "ticker", record["ticker"]
-        ).execute()
+    if current_new:
+        client.table("stocks").insert(current_new).execute()
+        print(f"  Inserted {len(current_new)} new current constituents/benchmark")
+
     if historical_existing:
+        for record in historical_existing:
+            client.table("stocks").update(record).eq(
+                "ticker", record["ticker"]
+            ).execute()
         print(f"  Updated {len(historical_existing)} former constituents")
 
     if historical_new:
@@ -205,8 +213,8 @@ def uploadToSupabase(
         ).execute()
 
     print(f"  Deactivated {len(missing_tickers)} tickers outside the configured universe")
-    return len(current_records) + len(historical_new), len(missing_tickers)
-
+    new_count = len(current_new) + len(historical_new)
+    return new_count, len(missing_tickers)
 
 def getSupabaseClient() -> supabase.Client:
     """Initialize Supabase with the configured privileged project key."""
