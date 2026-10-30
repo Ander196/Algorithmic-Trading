@@ -311,10 +311,10 @@ def processTicker(
                     tzinfo=timezone.utc,
                 )
                 if period.end_date_exclusive is not None
-                else today
+                else today + timedelta(days=1)
             )
             window_start = max(period_start, requested_start)
-            window_end = min(period_end, today)
+            window_end = min(period_end, today + timedelta(days=1))
 
             if window_start >= window_end:
                 continue
@@ -346,7 +346,7 @@ def processTicker(
                         today,
                     )
                     if period.end_date_exclusive is not None
-                    else today
+                    else today + timedelta(days=1)
                 )
                 label = "full membership window" if force or earliest is None else "refresh"
                 print(
@@ -385,7 +385,7 @@ def processTicker(
                     if latest.date() >= stale_date.date():
                         continue
                     fetch_start = latest + timedelta(days=1)
-                    fetch_end = today
+                    fetch_end = today + timedelta(days=1)
                     print(
                         f"  {ticker}: updating active membership from "
                         f"{fetch_start.date()} to {today.date()}"
