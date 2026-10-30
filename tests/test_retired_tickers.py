@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pandas as pd
@@ -172,3 +173,42 @@ def test_supabase_clients_require_privileged_key(monkeypatch, module):
         "url": "https://example.supabase.co",
         "key": "sb_secret_test_only",
     }
+
+
+def test_process_retired_ticker_never_fetches_after_last_trade_date(monkeypatch):
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 25, tzinfo=tz)
+
+    calls = []
+
+    monkeypatch.setattr(historical_loader, "datetime", FrozenDateTime)
+    monkeypatch.setattr(
+        historical_loader,
+        "RETIRED_TICKERS",
+        {"SPLK": {"last_trade_date": "2024-03-15"}},
+    )
+    monkeypatch.setattr(
+        historical_loader,
+        "getEarliestPriceDate",
+        lambda client, ticker: None,
+    )
+    monkeypatch.setattr(
+        historical_loader,
+        "getLatestPriceDate",
+        lambda client, ticker: None,
+    )
+
+    def fake_fetch(ticker, startDate, endDate, retries=2):
+        calls.append((ticker, startDate, endDate))
+        return None
+
+    monkeypatch.setattr(historical_loader, "fetchPriceData", fake_fetch)
+
+    result = historical_loader.processTicker(object(), "SPLK")
+
+    assert result["error"] is None
+    assert calls[0][0] == "SPLK"
+    assert calls[0][1] == historical_loader.HISTORICAL_START_DATE
+    assert calls[0][2] == datetime(2024, 3, 16, tzinfo=timezone.utc)
