@@ -2,9 +2,9 @@
 data_loader.py
 
 Incremental daily ingestion script for OHLCV data.
-- Fetches active tickers from `stocks` table
+- Fetches current S&P 500 constituents from `stocks` plus the SPY benchmark
 - Detects the last date with data in `stock_prices` per ticker
-- Fetches and inserts data from (last_date + 1) to today
+- Inserts only dates inside the ticker membership window
 
 Usage:
     python data_loader.py
