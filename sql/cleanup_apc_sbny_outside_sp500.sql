@@ -9,25 +9,7 @@
 
 BEGIN;
 
--- Preview the exact rows targeted by the cleanup.
-SELECT
-    ticker,
-    COUNT(*) AS rows_to_remove,
-    MIN(price_date) AS first_price_date,
-    MAX(price_date) AS last_price_date
-FROM public.stock_prices
-WHERE
-    (ticker = 'APC' AND NOT (
-        price_date >= DATE '2000-01-01'
-        AND price_date < DATE '2019-08-09'
-    ))
-    OR
-    (ticker = 'SBNY' AND NOT (
-        price_date >= DATE '2021-12-20'
-        AND price_date < DATE '2023-03-11'
-    ))
-GROUP BY ticker
-ORDER BY ticker;
+-- Run preview_apc_sbny_sp500_cleanup.sql first, then execute this transaction.
 
 -- Keep a restorable copy of the complete rows before deleting them.
 CREATE TABLE IF NOT EXISTS public.stock_prices_sp500_cleanup_backup
@@ -44,7 +26,7 @@ WHERE
     OR
     (ticker = 'SBNY' AND NOT (
         price_date >= DATE '2021-12-20'
-        AND price_date < DATE '2023-03-15'
+        AND price_date < DATE '2023-03-11'
     ))
 ON CONFLICT DO NOTHING;
 
@@ -57,7 +39,7 @@ WHERE
     OR
     (ticker = 'SBNY' AND NOT (
         price_date >= DATE '2021-12-20'
-        AND price_date < DATE '2023-03-15'
+        AND price_date < DATE '2023-03-11'
     ));
 
 COMMIT;
@@ -73,6 +55,6 @@ WHERE
     OR
     (ticker = 'SBNY' AND NOT (
         price_date >= DATE '2021-12-20'
-        AND price_date < DATE '2023-03-15'
+        AND price_date < DATE '2023-03-11'
     ))
 GROUP BY ticker;
