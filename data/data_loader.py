@@ -11,7 +11,7 @@ Usage:
 
 Environment variables required in .env.secrets:
     SUPABASE_URL=https://your-project.supabase.co
-    SUPABASE_ANON_KEY=your-anon-key
+    SUPABASE_KEY=your-service-role-key
 """
 
 import os
@@ -56,10 +56,10 @@ def _is_duplicate_key_error(error: Exception) -> bool:
 def getSupabaseClient() -> supabase.Client:
     """Initialize and return Supabase client."""
     supabaseUrl = os.getenv("SUPABASE_URL")
-    supabaseKey = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    supabaseKey = os.getenv("SUPABASE_KEY")
 
     if not supabaseUrl or not supabaseKey:
-        raise ValueError("SUPABASE_URL and SUPABASE_KEY (or SUPABASE_ANON_KEY) must be set in .env.secrets")
+        raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in .env.secrets")
 
     return supabase.create_client(supabaseUrl, supabaseKey)
 
@@ -278,7 +278,7 @@ def _build_daily_ingestion_window(
 
 
 def processTicker(client: supabase.Client, ticker: str) -> dict[str, Any]:
-    """Process one ticker unless it is on the permanent invalid-data blocklist."""
+    """Process one ticker only while it is a current S&P 500 constituent."""
     ticker = normalize_ticker(ticker)
     result = {
         "ticker": ticker,
