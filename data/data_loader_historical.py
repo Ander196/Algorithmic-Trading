@@ -36,14 +36,22 @@ HISTORICAL_START_DATE = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 
 def getSupabaseClient() -> supabase.Client:
-    """Initialize and return Supabase client."""
+    """Create a privileged client for trusted local historical ingestion.
+
+    The job inserts into RLS-protected stock_prices, so a secret/service-role
+    key is required. A public/anon key is not sufficient for these writes.
+    """
     supabaseUrl = os.getenv("SUPABASE_URL")
-    supabaseKey = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    supabaseKey = (
+        os.getenv("SUPABASE_SECRET_KEY")
+        or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    )
 
     if not supabaseUrl or not supabaseKey:
         raise ValueError(
-            "SUPABASE_URL and SUPABASE_KEY (or SUPABASE_ANON_KEY) "
-            "must be set in .env.secrets"
+            "Set SUPABASE_URL and SUPABASE_SECRET_KEY "
+            "(or SUPABASE_SERVICE_ROLE_KEY) in .env.secrets. "
+            "SUPABASE_ANON_KEY/publishable keys cannot authorize this write job."
         )
 
     return supabase.create_client(supabaseUrl, supabaseKey)
