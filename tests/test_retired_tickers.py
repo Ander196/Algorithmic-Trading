@@ -138,7 +138,7 @@ def test_upload_keeps_former_members_inactive_and_does_not_reset_created_at():
 
     ticker_loader.uploadToSupabase(frame, client)
 
-    current_existing = client.updated_records[0]
+    current_existing = client.upserted_records[0]
     current_new = client.inserted_records[0]
     retired_new = client.inserted_records[1]
     assert current_existing["ticker"] == "AAPL"
