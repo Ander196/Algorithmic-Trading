@@ -25,15 +25,13 @@ EXCLUDED_TICKERS = frozenset(
         "ULVR.L",
         "VOD.L",
         # Explicitly retired: no usable stored history; do not re-add it.
-        "WBD",
         # Retired after merger; exclude from live data, but keep its stored
         # history eligible for historical point-in-time Alpha research.
-        "QRVO",
     }
 )
 
 
-HISTORICAL_ALPHA_INCLUDED_TICKERS = frozenset({"QRVO"})
+HISTORICAL_ALPHA_INCLUDED_TICKERS = frozenset()
 
 
 def normalize_ticker(ticker: object) -> str:
