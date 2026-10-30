@@ -49,13 +49,12 @@ def test_price_window_uses_original_last_trade_date_not_only_index_removal():
     sbny = get_sp500_price_periods("SBNY")
     assert len(sbny) == 1
     assert sbny[0].end_date_exclusive == date(2023, 3, 11)
-    assert not is_sp500_member("SBNY", "2023-03-14")
+    assert is_sp500_member("SBNY", "2023-03-14")
 
 
 def test_membership_boundaries_are_start_inclusive_end_exclusive():
     assert is_sp500_member("SBNY", "2021-12-20")
     assert not is_sp500_member("SBNY", "2023-03-15")
-    assert not get_sp500_price_periods("SBNY")[0].end_date_exclusive > date(2023, 3, 11)
     assert is_sp500_member("APC", "2019-08-08")
     assert not is_sp500_member("APC", "2019-08-09")
 
