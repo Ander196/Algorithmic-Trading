@@ -8,14 +8,17 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
 
+from data.retired_tickers import RETIRED_TICKERS
+
 SP500_HISTORY_START = date(2000, 1, 1)
+SP500_MEMBERSHIP_AS_OF = date(2026, 10, 30)
 SP500_BENCHMARK_TICKER = "SPY"
 _MEMBERSHIP_PATH = Path(__file__).with_name("sp500_membership.csv")
 
@@ -97,7 +100,7 @@ def get_sp500_tickers() -> list[str]:
 
 def get_current_sp500_tickers(as_of: date | str | pd.Timestamp | None = None) -> list[str]:
     """Return S&P 500 constituents for one date (today when omitted)."""
-    day = _as_date(as_of or date.today())
+    day = _as_date(as_of or SP500_MEMBERSHIP_AS_OF)
     current = {
         period.ticker
         for period in load_sp500_membership()
@@ -114,6 +117,37 @@ def get_sp500_membership_periods(ticker: str) -> tuple[MembershipPeriod, ...]:
         period for period in load_sp500_membership()
         if period.ticker == normalized
     )
+
+
+def get_sp500_price_periods(ticker: str) -> tuple[MembershipPeriod, ...]:
+    """Return membership windows clipped to the original security's last trade.
+
+    A retired symbol may remain an index constituent for several days after
+    trading was halted or the original security stopped trading. Its curated
+    last_trade_date is therefore applied as an additional exclusive boundary.
+    """
+    periods = list(get_sp500_membership_periods(ticker))
+    metadata = RETIRED_TICKERS.get(str(ticker).strip().upper(), {})
+    raw_last_trade = metadata.get("last_trade_date")
+    if not periods or not raw_last_trade:
+        return tuple(periods)
+
+    last_trade_exclusive = date.fromisoformat(raw_last_trade) + timedelta(days=1)
+    final_period = periods[-1]
+    effective_end = (
+        min(final_period.end_date_exclusive, last_trade_exclusive)
+        if final_period.end_date_exclusive is not None
+        else last_trade_exclusive
+    )
+    if effective_end <= final_period.start_date:
+        periods.pop()
+    else:
+        periods[-1] = MembershipPeriod(
+            ticker=final_period.ticker,
+            start_date=final_period.start_date,
+            end_date_exclusive=effective_end,
+        )
+    return tuple(periods)
 
 
 def is_sp500_member(
@@ -137,7 +171,7 @@ def filter_sp500_price_rows(
     """Keep only price rows whose dates fall inside a ticker's S&P membership."""
     if date_column not in frame.columns:
         raise ValueError(f"Missing date column '{date_column}'")
-    periods = get_sp500_membership_periods(ticker)
+    periods = get_sp500_price_periods(ticker)
     if not periods:
         return frame.iloc[0:0].copy()
 
@@ -161,10 +195,12 @@ __all__ = [
     "MembershipPeriod",
     "SP500_BENCHMARK_TICKER",
     "SP500_HISTORY_START",
+    "SP500_MEMBERSHIP_AS_OF",
     "YFINANCE_TICKER_ALIASES",
     "filter_sp500_price_rows",
     "get_current_sp500_tickers",
     "get_sp500_membership_periods",
+    "get_sp500_price_periods",
     "get_sp500_tickers",
     "get_yfinance_symbol",
     "is_sp500_member",
