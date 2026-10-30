@@ -123,14 +123,29 @@ def buildTickerCatalog() -> pd.DataFrame:
 
 
 def getExistingTickers(client: supabase.Client) -> set[str]:
-    """Get all tickers already present in the stocks table."""
-    response = client.table("stocks").select("ticker").execute()
-    return {
-        str(row["ticker"]).strip().upper()
-        for row in (response.data or [])
-        if row.get("ticker")
-    }
+    """Get every ticker already present in stocks, beyond the REST row cap."""
+    tickers: set[str] = set()
+    page_size = 1_000
+    offset = 0
 
+    while True:
+        query = client.table("stocks").select("ticker")
+        if hasattr(query, "range"):
+            query = query.range(offset, offset + page_size - 1)
+        elif offset:
+            break
+        response = query.execute()
+        rows = response.data or []
+        tickers.update(
+            str(row["ticker"]).strip().upper()
+            for row in rows
+            if row.get("ticker")
+        )
+        if len(rows) < page_size:
+            break
+        offset += page_size
+
+    return tickers
 
 def getNowTimestamptz() -> str:
     """Get current UTC timestamp in ISO format."""
@@ -177,17 +192,16 @@ def uploadToSupabase(
             else:
                 historical_new.append(record)
         elif ticker in existing:
-            # Existing rows retain their original created_at timestamp.
+            # Do not include created_at in an update of an existing record.
             current_existing.append(record)
         else:
             record["created_at"] = now
             current_new.append(record)
 
     if current_existing:
-        for record in current_existing:
-            client.table("stocks").update(record).eq(
-                "ticker", record["ticker"]
-            ).execute()
+        client.table("stocks").upsert(
+            current_existing, on_conflict="ticker"
+        ).execute()
         print(f"  Updated {len(current_existing)} existing current constituents/benchmark")
 
     if current_new:
@@ -195,10 +209,9 @@ def uploadToSupabase(
         print(f"  Inserted {len(current_new)} new current constituents/benchmark")
 
     if historical_existing:
-        for record in historical_existing:
-            client.table("stocks").update(record).eq(
-                "ticker", record["ticker"]
-            ).execute()
+        client.table("stocks").upsert(
+            historical_existing, on_conflict="ticker"
+        ).execute()
         print(f"  Updated {len(historical_existing)} former constituents")
 
     if historical_new:
