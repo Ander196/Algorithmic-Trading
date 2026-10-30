@@ -1,6 +1,7 @@
 -- One-time cleanup: remove APC/SBNY prices outside their S&P 500 membership.
 -- APC: membership [2000-01-01, 2019-08-09)
--- SBNY: membership [2021-12-20, 2023-03-15)
+-- SBNY: membership [2021-12-20, 2023-03-15), last traded 2023-03-10
+-- Price window therefore ends exclusively on 2023-03-11.
 --
 -- Run in Supabase SQL Editor after reviewing the preview result.
 -- The backup table is retained so deleted rows can be inspected/restored.
@@ -23,7 +24,7 @@ WHERE
     OR
     (ticker = 'SBNY' AND NOT (
         price_date >= DATE '2021-12-20'
-        AND price_date < DATE '2023-03-15'
+        AND price_date < DATE '2023-03-11'
     ))
 GROUP BY ticker
 ORDER BY ticker;
