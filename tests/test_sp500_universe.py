@@ -7,6 +7,7 @@ from data.sp500_universe import (
     filter_sp500_price_rows,
     get_current_sp500_tickers,
     get_sp500_membership_periods,
+    get_sp500_price_periods,
     get_sp500_tickers,
     is_sp500_member,
     load_sp500_membership,
@@ -44,9 +45,17 @@ def test_repeated_membership_is_preserved():
     assert periods[1].start_date == date(2017, 3, 20)
 
 
+def test_price_window_uses_original_last_trade_date_not_only_index_removal():
+    sbny = get_sp500_price_periods("SBNY")
+    assert len(sbny) == 1
+    assert sbny[0].end_date_exclusive == date(2023, 3, 11)
+    assert not is_sp500_member("SBNY", "2023-03-14")
+
+
 def test_membership_boundaries_are_start_inclusive_end_exclusive():
     assert is_sp500_member("SBNY", "2021-12-20")
     assert not is_sp500_member("SBNY", "2023-03-15")
+    assert not get_sp500_price_periods("SBNY")[0].end_date_exclusive > date(2023, 3, 11)
     assert is_sp500_member("APC", "2019-08-08")
     assert not is_sp500_member("APC", "2019-08-09")
 
