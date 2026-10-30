@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 from data.excluded_tickers import normalize_ticker
 from data.sp500_universe import (
     filter_sp500_price_rows,
-    get_sp500_membership_periods,
+    get_sp500_price_periods,
     get_sp500_tickers,
 )
 
@@ -263,7 +263,7 @@ def build_sp500_alpha_dataset(
     frames: list[pd.DataFrame] = []
 
     for ticker, history in stock_data.items():
-        for period in get_sp500_membership_periods(ticker):
+        for period in get_sp500_price_periods(ticker):
             start = pd.Timestamp(period.start_date)
             segment = history.loc[history.index >= start]
             if period.end_date_exclusive is not None:
