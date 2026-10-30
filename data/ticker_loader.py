@@ -208,15 +208,18 @@ def uploadToSupabase(
     return len(current_records) + len(historical_new), len(missing_tickers)
 
 
-def main() -> None:
-    """Refresh the current S&P catalog and register all former constituents."""
+def getSupabaseClient() -> supabase.Client:
+    """Initialize Supabase with the configured privileged project key."""
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_key = os.getenv("SUPABASE_KEY")
-
     if not supabase_url or not supabase_key:
         raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in .env.secrets")
+    return supabase.create_client(supabase_url, supabase_key)
 
-    client = supabase.create_client(supabase_url, supabase_key)
+
+def main() -> None:
+    """Refresh the current S&P catalog and register all former constituents."""
+    client = getSupabaseClient()
     catalog = buildTickerCatalog()
     current_count = int((~catalog["historical_only"]).sum())
     historical_count = int(catalog["historical_only"].sum())
