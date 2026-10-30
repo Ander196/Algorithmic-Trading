@@ -307,35 +307,61 @@ def processTicker(
             )
         )
 
+        retired_metadata = RETIRED_TICKERS.get(ticker)
+        is_historical_only = retired_metadata is not None
+        effectiveEnd = today
+        if is_historical_only:
+            last_trade_date = datetime.strptime(
+                retired_metadata["last_trade_date"], "%Y-%m-%d"
+            ).replace(tzinfo=timezone.utc)
+            # yfinance's end parameter is exclusive.
+            effectiveEnd = min(today, last_trade_date + timedelta(days=1))
+
         earliestDate = getEarliestPriceDate(client, ticker)
         latestDate = getLatestPriceDate(client, ticker)
 
         if latestDate is None:
             startDate = requestedStart
             label = f"since {startDate.date()}"
-            print(f"  {ticker}: No existing data, fetching {label} to {today.date()}")
+            print(
+                f"  {ticker}: No existing data, fetching {label} "
+                f"to {(effectiveEnd - timedelta(days=1)).date()}"
+            )
 
         else:
             startDate = latestDate + timedelta(days=1)
 
-            # With maximum-history mode, backfill the missing prefix without
-            # deleting existing rows. With bounded mode, only backfill to the
-            # requested start when the DB starts too late.
+            # Backfill the missing prefix, but never cross the original
+            # listed-equity cutoff for a retired symbol.
             if earliestDate is not None and earliestDate > requestedStart:
-                print(f"  {ticker}: Backfilling history before {earliestDate.date()}")
-                backfill = fetchPriceData(
-                    ticker,
-                    startDate=requestedStart,
-                    endDate=earliestDate,
-                )
-                if backfill is not None and not backfill.empty:
-                    result["fetched"] += len(backfill)
-                    result["inserted"] += uploadToSupabase(
-                        client, ticker, backfill
+                backfillEnd = min(earliestDate, effectiveEnd)
+                if requestedStart < backfillEnd:
+                    print(
+                        f"  {ticker}: Backfilling history before "
+                        f"{earliestDate.date()}"
                     )
+                    backfill = fetchPriceData(
+                        ticker,
+                        startDate=requestedStart,
+                        endDate=backfillEnd,
+                    )
+                    if backfill is not None and not backfill.empty:
+                        result["fetched"] += len(backfill)
+                        result["inserted"] += uploadToSupabase(
+                            client, ticker, backfill
+                        )
 
             if force:
                 startDate = requestedStart
+            elif is_historical_only:
+                last_allowed_date = (effectiveEnd - timedelta(days=1)).date()
+                if latestDate.date() >= last_allowed_date:
+                    print(
+                        f"  {ticker}: Historical series complete through "
+                        f"{latestDate.date()} (cutoff {last_allowed_date})"
+                    )
+                    result["skipped"] = 1
+                    return result
             elif latestDate.date() >= staleDate.date():
                 print(f"  {ticker}: Up to date through {latestDate.date()}")
                 result["skipped"] = 1
@@ -343,18 +369,22 @@ def processTicker(
             else:
                 print(
                     f"  {ticker}: Updating recent data from "
-                    f"{startDate.date()} to {today.date()}"
+                    f"{startDate.date()} to "
+                    f"{(effectiveEnd - timedelta(days=1)).date()}"
                 )
 
-        if startDate is not None and startDate.date() >= today.date():
-            print(f"  {ticker}: Already up to date")
+        if startDate is not None and startDate >= effectiveEnd:
+            print(
+                f"  {ticker}: No remaining dates before the historical "
+                "cutoff; already up to date"
+            )
             result["skipped"] = 1
             return result
 
         df = fetchPriceData(
             ticker,
             startDate=startDate,
-            endDate=today,
+            endDate=effectiveEnd,
         )
         if df is None or df.empty:
             print(f"  {ticker}: No data fetched")
@@ -366,7 +396,6 @@ def processTicker(
             f"  {ticker}: fetched={result['fetched']}, "
             f"inserted={result['inserted']}"
         )
-
     except Exception as exc:
         result["error"] = str(exc)
         print(f"  {ticker}: ERROR - {exc}")
