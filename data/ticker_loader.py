@@ -228,71 +228,131 @@ def getNowTimestamptz() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+
 def uploadToSupabase(df: pd.DataFrame, client: supabase.Client) -> tuple[int, int]:
     """
-    Upload current and historical-only tickers to the Supabase stocks table.
-    - Current tickers are stored with is_active=True.
-    - Curated retired tickers are stored with is_active=False.
-    - Tickers absent from the combined fetch are marked inactive.
-    Returns (new_count, deactivated_count)
+    Upload current and historical-only tickers separately.
+
+    Current tickers:
+        - Upsert with refreshed created_at.
+
+    Existing historical tickers:
+        - Update metadata without changing created_at.
+
+    New historical tickers:
+        - Insert without created_at, allowing the database default.
+
+    Returns (new_count, deactivated_count).
     """
     if not df.empty:
         df = df.loc[~df["ticker"].map(is_excluded_ticker)].copy()
 
     existingTickers = getExistingTickers(client)
-    newCount = 0
-    deactivatedCount = 0
 
-    # Do not deactivate the entire universe if a catalog fetch returns no
-    # eligible symbols. Still ensure the permanent blocklist stays inactive.
     if df.empty:
         excluded_existing = {
-            ticker for ticker in existingTickers if is_excluded_ticker(ticker)
+            ticker for ticker in existingTickers
+            if is_excluded_ticker(ticker)
         }
         for ticker in excluded_existing:
-            client.table("stocks").update({"is_active": False}).eq(
-                "ticker", ticker
-            ).execute()
+            client.table("stocks").update(
+                {"is_active": False}
+            ).eq("ticker", ticker).execute()
+
         return 0, len(excluded_existing)
 
     now = getNowTimestamptz()
-    print(f"\nExisting tickers in DB: {len(existingTickers)}")
-    print(f"New tickers to upload: {len(df)}")
 
-    # `created_at` is the universe-run marker consumed by train-only. Refresh
-    # it for every ticker in this load, not only newly discovered symbols.
-    records = []
+    current_records = []
+    historical_existing = []
+    historical_new = []
+
+    newCount = 0
+    deactivatedCount = 0
+
+    print(f"\nExisting tickers in DB: {len(existingTickers)}")
+    print(f"Prepared tickers to upload: {len(df)}")
+
     for _, row in df.iterrows():
         ticker = row["ticker"]
+
         historical_flag = row.get("historical_only", False)
-        historical_only = bool(historical_flag) if pd.notna(historical_flag) else False
+        historical_only = (
+            bool(historical_flag)
+            if pd.notna(historical_flag)
+            else False
+        )
+
         record = {
-            "ticker": ticker, "name": row["name"], "exchange": row["exchange"],
-            "sector": row["sector"], "industry": row["industry"],
+            "ticker": ticker,
+            "name": row["name"],
+            "exchange": row["exchange"],
+            "sector": row["sector"],
+            "industry": row["industry"],
             "is_active": not historical_only,
         }
-        # Avoid refreshing the live-universe run marker for historical-only
-        # rows. Omitted created_at preserves existing timestamps on upsert;
-        # new rows receive the database default.
-        if not historical_only:
-            record["created_at"] = now
-        records.append(record)
+
         if ticker not in existingTickers:
             newCount += 1
 
-    if records:
-        client.table("stocks").upsert(records, on_conflict="ticker").execute()
-        print(f"  Upserted {len(records)} tickers for execution {now}")
+        if not historical_only:
+            record["created_at"] = now
+            current_records.append(record)
 
-    # Deactivate tickers no longer in the fetched list
+        elif ticker in existingTickers:
+            historical_existing.append(record)
+
+        else:
+            # Omit created_at entirely so PostgreSQL can apply
+            # its configured DEFAULT value.
+            historical_new.append(record)
+
+    # 1. Upsert current tickers.
+    if current_records:
+        client.table("stocks").upsert(
+            current_records,
+            on_conflict="ticker"
+        ).execute()
+
+        print(f"  Upserted {len(current_records)} current tickers")
+
+    # 2. Update existing historical tickers without touching created_at.
+    for record in historical_existing:
+        client.table("stocks").update(record).eq(
+            "ticker", record["ticker"]
+        ).execute()
+
+    if historical_existing:
+        print(
+            f"  Updated {len(historical_existing)} existing "
+            "historical tickers"
+        )
+
+    # 3. Insert new historical tickers without created_at.
+    if historical_new:
+        client.table("stocks").insert(
+            historical_new
+        ).execute()
+
+        print(f"  Inserted {len(historical_new)} new historical tickers")
+
+    # 4. Deactivate tickers no longer in the fetched universe.
     fetchedTickers = set(df["ticker"].tolist())
     missingTickers = existingTickers - fetchedTickers
 
     if missingTickers:
-        print(f"Deactivating {len(missingTickers)} tickers no longer in fetched list...")
+        print(
+            f"Deactivating {len(missingTickers)} "
+            "tickers no longer in fetched list..."
+        )
+
         for ticker in missingTickers:
-            client.table("stocks").update({"is_active": False}).eq("ticker", ticker).execute()
+            client.table("stocks").update(
+                {"is_active": False}
+            ).eq("ticker", ticker).execute()
+
             deactivatedCount += 1
+
         print(f"  Deactivated {deactivatedCount} tickers")
 
     return newCount, deactivatedCount
