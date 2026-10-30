@@ -7,14 +7,15 @@ US and European exchanges and uploads to Supabase `stocks` table.
 Usage:
     python ticker_loader.py
 
-Environment variables required in .env:
+Environment variables required in .env.secrets:
     SUPABASE_URL=https://your-project.supabase.co
-    SUPABASE_ANON_KEY=your-anon-key
+    SUPABASE_SECRET_KEY=sb_secret_... (preferred)
+    # Or legacy SUPABASE_SERVICE_ROLE_KEY=...
 """
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import supabase
@@ -190,25 +191,45 @@ def fetchRetiredTickerInfo() -> pd.DataFrame:
 
     for ticker in tickers:
         try:
+            metadata = RETIRED_TICKERS[ticker]
+            last_trade_date = datetime.strptime(
+                metadata["last_trade_date"], "%Y-%m-%d"
+            ).replace(tzinfo=timezone.utc)
+            end_exclusive = last_trade_date + timedelta(days=1)
+
+            # Bound the request to the original listing's final trading day.
+            # This avoids symbol reuse (e.g. APC) and later OTC-only quotes.
             history = yf.Ticker(ticker).history(
-                period="max",
+                start="2000-01-01",
+                end=end_exclusive,
                 auto_adjust=False,
                 actions=False,
+                raise_errors=True,
             )
             if history is None or history.empty:
-                print(f"  {ticker}: no Yahoo Finance history; not registering")
+                print(
+                    f"  {ticker}: no Yahoo history through {last_trade_date.date()}; "
+                    "not registering"
+                )
+                continue
+
+            returned_last_date = pd.to_datetime(history.index).max().date()
+            if returned_last_date > last_trade_date.date():
+                print(
+                    f"  {ticker}: Yahoo returned data after the original "
+                    f"last-trade date ({returned_last_date}); rejecting symbol"
+                )
                 continue
 
             results.append({
                 "ticker": ticker,
-                **RETIRED_TICKERS[ticker],
+                **metadata,
                 "historical_only": True,
             })
-            first_date = history.index.min().date()
-            last_date = history.index.max().date()
+            first_date = pd.to_datetime(history.index).min().date()
             print(
                 f"  {ticker}: {len(history)} Yahoo rows "
-                f"({first_date} to {last_date}); historical-only"
+                f"({first_date} to {returned_last_date}); historical-only"
             )
         except Exception as exc:
             print(f"  {ticker}: Yahoo history check failed; not registering ({exc})")
@@ -226,6 +247,26 @@ def getExistingTickers(client: supabase.Client) -> set[str]:
 def getNowTimestamptz() -> str:
     """Get current UTC timestamp in ISO format."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def getSupabaseClient() -> supabase.Client:
+    """Create a privileged client for trusted local ingestion.
+
+    A secret/service-role key is required because this job inserts and updates
+    rows in RLS-protected tables. The public/anon key is deliberately rejected.
+    """
+    supabaseUrl = os.getenv("SUPABASE_URL")
+    supabaseKey = (
+        os.getenv("SUPABASE_SECRET_KEY")
+        or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    )
+    if not supabaseUrl or not supabaseKey:
+        raise ValueError(
+            "Set SUPABASE_URL and SUPABASE_SECRET_KEY "
+            "(or SUPABASE_SERVICE_ROLE_KEY) in .env.secrets. "
+            "SUPABASE_ANON_KEY/publishable keys cannot authorize this write job."
+        )
+    return supabase.create_client(supabaseUrl, supabaseKey)
 
 
 def uploadToSupabase(df: pd.DataFrame, client: supabase.Client) -> tuple[int, int]:
@@ -300,15 +341,8 @@ def uploadToSupabase(df: pd.DataFrame, client: supabase.Client) -> tuple[int, in
 
 def main() -> None:
     """Main entry point."""
-    # Load environment variables
-    supabaseUrl = os.getenv("SUPABASE_URL")
-    supabaseKey = os.getenv("SUPABASE_ANON_KEY")
-
-    if not supabaseUrl or not supabaseKey:
-        raise ValueError("SUPABASE_URL and SUPABASE_ANON_KEY must be set in .env")
-
-    # Initialize Supabase client
-    client = supabase.create_client(supabaseUrl, supabaseKey)
+    # Initialize a privileged client for this trusted local ingestion job.
+    client = getSupabaseClient()
 
     # Enforce the exclusion in the database too; do not let a catalog refresh
     # reactivate symbols whose price history was intentionally removed.
