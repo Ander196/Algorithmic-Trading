@@ -17,8 +17,9 @@ Multiple rows for one ticker are intentional when it left and later re-entered.
   file [sp500_changes_since_1996.csv](https://github.com/chinobing/historical_sp500_constituents/blob/main/sp500_changes_since_1996.csv),
   reconciled against that repository's current-constituents snapshot dated 2026-10-30.
 
-The historical interval source is distributed under the MIT License. Its attribution
-and full license text are retained in `SP500_DATA_SOURCE_LICENSE.txt`.
+Both upstream repositories publish these source files under the MIT License.
+Their attribution and full license texts are retained in `SP500_DATA_SOURCE_LICENSE.txt`
+and `SP500_CHANGE_SOURCE_LICENSE.txt`.
 
 This is a maintained research dataset, not an official S&P Dow Jones Indices feed.
 Ticker identity changes, special share classes and implementation dates must be
