@@ -119,6 +119,14 @@ def test_upload_keeps_former_members_inactive_and_does_not_reset_created_at():
             "historical_only": False,
         },
         {
+            "ticker": "MSFT",
+            "name": "Microsoft",
+            "exchange": "NMS",
+            "sector": "Technology",
+            "industry": "Software",
+            "historical_only": False,
+        },
+        {
             "ticker": "SPLK",
             "name": "Splunk",
             "exchange": "Unknown",
@@ -130,14 +138,18 @@ def test_upload_keeps_former_members_inactive_and_does_not_reset_created_at():
 
     ticker_loader.uploadToSupabase(frame, client)
 
-    current = client.upserted_records[0]
-    retired = client.inserted_records[0]
-    assert current["ticker"] == "AAPL"
-    assert current["is_active"] is True
-    assert "created_at" in current
-    assert retired["ticker"] == "SPLK"
-    assert retired["is_active"] is False
-    assert "created_at" not in retired
+    current_existing = client.updated_records[0]
+    current_new = client.inserted_records[0]
+    retired_new = client.inserted_records[1]
+    assert current_existing["ticker"] == "AAPL"
+    assert current_existing["is_active"] is True
+    assert "created_at" not in current_existing
+    assert current_new["ticker"] == "MSFT"
+    assert current_new["is_active"] is True
+    assert "created_at" in current_new
+    assert retired_new["ticker"] == "SPLK"
+    assert retired_new["is_active"] is False
+    assert "created_at" not in retired_new
 
 
 @pytest.mark.parametrize("module", [ticker_loader, historical_loader])
