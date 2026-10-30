@@ -1,16 +1,11 @@
+"""Build the stock catalog from all historical S&P 500 constituents.
+
+The S&P 500 point-in-time CSV is the source of truth. Current constituents are
+active, former constituents remain registered but inactive so historical OHLCV
+can be stored under the stocks foreign key. SPY is retained as the benchmark.
 """
-ticker_loader.py
 
-Fetches stock information (ticker, name, exchange, sector, industry) from
-US and European exchanges and uploads to Supabase `stocks` table.
-
-Usage:
-    python ticker_loader.py
-
-Environment variables required in .env.secrets:
-    SUPABASE_URL=https://your-project.supabase.co
-    SUPABASE_KEY=your-anon-key
-"""
+from __future__ import annotations
 
 import os
 import time
@@ -21,206 +16,120 @@ import supabase
 import yfinance as yf
 from dotenv import load_dotenv
 
-from data.excluded_tickers import EXCLUDED_TICKERS, is_excluded_ticker, normalize_ticker
 from data.retired_tickers import RETIRED_TICKERS
+from data.sp500_universe import (
+    SP500_BENCHMARK_TICKER,
+    get_current_sp500_tickers,
+    get_sp500_tickers,
+    get_yfinance_symbol,
+)
 
 load_dotenv(".env.secrets")
 
 
-# Ticker lists to fetch - can be extended
-# US Indices component stocks
-US_TICKERS = [
-    # Tech/Communication
-    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AVGO", "ORCL", "CRM",
-    "CSCO", "ADBE", "ACN", "IBM", "INTC", "AMD", "QCOM", "TXN", "NOW", "INTU",
-    "AMAT", "MU", "LRCX", "KLAC", "SNPS", "CDNS", "PANW", "CRWD", "FTNT", "NET",
-    "ZS", "PLTR", "SNOW", "DDOG", "HUBS", "MDB", "TEAM", "WDAY", "OKTA", "SPLK",
-    "NXPI", "ON", "MPWR", "ADI", "MCHP", "XEL", "CTAS", "CDW", "MNST", "KDP",
-    "GFS", "AS", "CPRT", "PAYC", "CDNS", "ANSS", "PTC", "SWKS", "KEYS",
-    "TER", "VEON", "LBTYK", "FOX", "DIS", "CMCSA", "CHTR", "T", "VZ",
-    # Consumer/Retail
-    "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "AXP",
-    "COST", "WMT", "HD", "MCD", "NKE", "SBUX", "TGT", "LOW", "DG", "DLTR",
-    "BBY", "ROST", "BURL", "DHI", "LEN", "PHM", "DRI", "TAP", "MNST", "KDP",
-    "EL", "CL", "PG", "KO", "PEP", "PM", "MO", "GIS", "K", "HSY",
-    "MDLZ", "KHC", "CLX", "HRL", "SYY", "DGX", "LH", "IQV", "IDXX", "REGN",
-    "VRTX", "GILD", "BIIB", "MRNA", "NVAX", "CTVA", "FANG", "DVN", "EOG", "PXD",
-    "SLB", "HAL", "BKR", "SLB", "OXY", "COP", "PSX", "VLO", "MPC", "DK",
-    # Financials
-    "BRK.B", "SPGI", "C", "USB", "PNC", "TFC", "COF", "AFL", "MET", "PRU",
-    "L", "TRV", "AON", "MMC", "WTW", "BRO", "FDS", "NDAQ", "ICE", "CME",
-    "CB", "TRG", "AJG", "AIG", "SNA", "BLK", "BK", "STT", "NTRS", "SPGI",
-    # Industrial
-    "CAT", "DE", "BA", "GE", "HON", "UPS", "FDX", "RTX", "LMT", "NOC",
-    "GD", "LHX", "HII", "LDOS", "SAIC", "CARR", "OTIS", "WM", "RSG", "NSC",
-    "CSX", "UNP", "ETN", "EMR", "ROK", "PH", "ITW", "SWK", "IR", "CMI",
-    # Healthcare
-    "UNH", "JNJ", "LLY", "PFE", "ABBV", "MRK", "TMO", "ABT", "DHR", "BMY",
-    "AMGN", "GILD", "VRTX", "BIIB", "REGN", "MRNA", "ISRG", "DXCM", "HOLX", "IDXX",
-    "ALGN", "ZBH", "STE", "Hologic", "EW", "MDT", "SYK", "BSX", "EW", "ZHT",
-    # Energy
-    "XOM", "CVX", "COP", "SLB", "EOG", "PXD", "MPC", "VLO", "PSX", "OXY",
-    "HAL", "BKR", "DVN", "FANG", "EQT", "OKE", "WMB", "KMI", "TRGP", "ET",
-    # Utilities/REITs
-    "NEE", "DUK", "SO", "D", "AEP", "SRE", "EXC", "XEL", "ED", "PEG",
-    "PSA", "AMT", "PLD", "EQIX", "SPG", "O", "WELL", "DLR", "AVB", "EQR",
-    # Materials
-    "LIN", "APD", "SHW", "FCX", "NEM", "NUE", "STLD", "RS", "PPG", "ALB",
-    "CE", "CTVA", "FMC", "MOS", "CF", "SMG",
-    # Indexes
-    "SPY", "QQQ"
-]
-
-# European stocks (major exchanges)
-EU_TICKERS = [
-    '''# UK (LSE)
-    "SHEL.L", "HSBA.L", "AZN.L", "ULVR.L", "BP.L", "GSK.L", "RIO.L", "BATS.L",
-    "REL.L", "NVO.L", "VOD.L", "LSEG.L", "NG.L", "BT-A.L", " SSE.L", "PRU.L",
-    # Germany (XETRA)
-    "SAP.DE", "SIE.DE", "ALV.DE", "BAS.DE", "MBG.DE", "BMW.DE", "BAYN.DE", "ADS.DE",
-    "DBK.DE", "DTE.DE", "ENR.DE", "VNA.DE", "RWE.DE", "FRE.DE", "HEI.DE", "MTX.DE",
-    # France (Euronext)
-    "OR.PA", "MC.PA", "CAP.PA", "SAN.PA", "BNP.PA", "GLE.PA", "ACA.PA", "CS.PA",
-    "AIR.PA", "VLO.PA", "ENGI.PA", "FDJ.PA", "RMS.PA", "KER.PA", "LR.PA", "TTE.PA",
-    # Netherlands (Euronext)
-    "ASML.AS", "INGA.AS", "UNA.AS", "ADYEN.AS", "EXM.AS", "HEIA.AS", "PHIA.AS",
-    # Belgium (Euronext)
-    "ABI.BR", "UCB.BR", "KBC.BR", "ENGB.BR", "COLR.BR",
-    # Spain (BME)
-    "SAN.MC", "BBVA.MC", "ITX.MC", "TEF.MC", "REP.MC", "FER.MC", "ACS.MC", "AENA.MC",
-    # Italy (FTSE MIB)
-    "ISP.MI", "UCG.MI", "ENEL.MI", "ENI.MI", "TIT.MI", "G.MI", "PRY.MI", "MONC.MI",
-    # Switzerland (SIX)
-    "NESN.SW", "ROG.SW", "NVN.SW", "UBS.SW", "CSGN.SW", "ZURN.SW", "SLHN.SW", "SGSN.SW",
-    # Sweden (Nasdaq Stockholm)
-    "VOLV-B.SE", "ERIC-B.SE", "SEB-A.SE", "SHB-A.SE", "TEL2-B.SE", "ALFA.SE", "SKA-B.SE",
-    # Denmark (Nasdaq Copenhagen)
-    "NOVO-B.DK", "DSV.DK", "CARL-B.DK", "ORSTED.DK", "PNDORA.DK",
-    # Norway (Oslo Bors)
-    "EQNR.OL", "DNB.OL", "TEL.OL", "YAR.OL", "ORK.OL", "MOWI.OL", "SALM.OL",
-    # Finland (Nasdaq Helsinki)
-    "NDA-FI.HE", "SAMPO.HE", "KESKOB.HE", "STERV.HE", "METSO.HE", "NESTE.HE",
-    # Portugal (Euronext Lisbon)
-    "EDP.LS", "EGLW.LS", "GALP.LS", "JMT.LS", "NHL.LS",
-    # Austria (WBAG)
-    "EOS.VI", "AND.VI", "CAI.VI", "ANDR.VI", "OMV.VI", "VER.VI", "WIE.VI",
-    # Ireland (Euronext Dublin)
-    "CRG.IE", "KRON.IE", "EG7.IE", "ALH.IE", "HSIF.IE",
-    # Poland (Warsaw Stock Exchange)
-    "PKN.PW", "PKO.PW", "PEO.PW", "PZU.PW", "KGH.PW", "CDR.PW", "ALE.PW",
-    # Czech (Prague Stock Exchange)
-    "CEZ.PR", "KOMB.PR", "MONET.PR", "ERBA.PR",'''
-]
-
-# Combined ticker lists
-ALL_TICKERS = list(set(US_TICKERS + EU_TICKERS))
+def _fallback_metadata(ticker: str) -> dict:
+    """Return safe metadata when Yahoo quote metadata is unavailable."""
+    curated = RETIRED_TICKERS.get(ticker, {})
+    return {
+        "ticker": ticker,
+        "name": curated.get("name") or ticker,
+        "exchange": curated.get("exchange") or "Unknown",
+        "sector": curated.get("sector") or "Unknown",
+        "industry": curated.get("industry") or "Unknown",
+    }
 
 
-def fetchTickerInfo(ticker: str, retries: int = 2) -> dict | None:
-    """Fetch stock info unless the ticker is explicitly excluded."""
-    ticker = normalize_ticker(ticker)
-    if is_excluded_ticker(ticker):
-        return None
-
-    for attempt in range(retries):
+def fetchTickerInfo(ticker: str, retries: int = 2) -> dict:
+    """Fetch descriptive metadata, falling back without dropping constituents."""
+    ticker = str(ticker).strip().upper()
+    fallback = _fallback_metadata(ticker)
+    for attempt in range(max(1, retries)):
         try:
-            info = yf.Ticker(ticker).info
-            if info is None or info.get("regularMarketPrice") is None:
-                return None
-
-            # Extract relevant fields
+            info = yf.Ticker(get_yfinance_symbol(ticker)).info or {}
             return {
                 "ticker": ticker,
-                "name": info.get("shortName") or info.get("longName", "Unknown"),
-                "exchange": info.get("exchange", "Unknown"),
-                "sector": info.get("sector", "Unknown"),
-                "industry": info.get("industry", "Unknown"),
+                "name": info.get("shortName") or info.get("longName") or fallback["name"],
+                "exchange": info.get("exchange") or fallback["exchange"],
+                "sector": info.get("sector") or fallback["sector"],
+                "industry": info.get("industry") or fallback["industry"],
             }
         except Exception:
             if attempt < retries - 1:
-                time.sleep(1 * (attempt + 1))
-            continue
-    return None
+                time.sleep(attempt + 1)
+    # A provider metadata outage must never remove a valid point-in-time member.
+    return fallback
 
 
-def fetchAllTickers(tickers: list[str], batchSize: int = 50, delay: float = 0.5) -> pd.DataFrame:
-    """Fetch non-excluded ticker info with batching and rate limiting."""
-    tickers = [
-        normalize_ticker(t)
-        for t in tickers
-        if t
-        and not is_excluded_ticker(t)
-        and normalize_ticker(t) not in RETIRED_TICKERS
-    ]
+def fetchAllTickers(
+    tickers: list[str],
+    batchSize: int = 50,
+    delay: float = 0.3,
+) -> pd.DataFrame:
+    """Fetch current-constituent metadata, retaining all symbols on failure."""
+    normalized = sorted({str(t).strip().upper() for t in tickers if str(t).strip()})
     results = []
-    total = len(tickers)
-
-    print(f"Fetching info for {total} tickers...")
+    total = len(normalized)
+    print(f"Fetching metadata for {total} current S&P 500/benchmark tickers...")
 
     for i in range(0, total, batchSize):
-        batch = tickers[i:i + batchSize]
-        print(f"Processing batch {i // batchSize + 1}/{(total + batchSize - 1) // batchSize}: {batch[:3]}...")
-
+        batch = normalized[i:i + batchSize]
         for ticker in batch:
-            info = fetchTickerInfo(ticker)
-            if info:
-                results.append(info)
-            time.sleep(delay)
-
-        # Progress indicator
+            results.append(fetchTickerInfo(ticker))
+            if delay:
+                time.sleep(delay)
         progress = min(i + batchSize, total)
         print(f"  Progress: {progress}/{total} ({100 * progress / total:.1f}%)")
-
-    df = pd.DataFrame(results)
-    print(f"Successfully fetched {len(results)}/{total} tickers")
-    return df
-
-
-def fetchRetiredTickerInfo() -> pd.DataFrame:
-    """Register retired symbols only when Yahoo Finance returns price history.
-
-    Delisted symbols often no longer expose usable quote metadata through the
-    info endpoint. Their static descriptive fields are curated in
-    data.retired_tickers and verified against the history endpoint instead.
-    The returned rows are explicitly historical-only and must remain inactive.
-    """
-    results = []
-    tickers = list(RETIRED_TICKERS)
-    print(f"\nChecking Yahoo Finance history for {len(tickers)} retired tickers...")
-
-    for ticker in tickers:
-        try:
-            history = yf.Ticker(ticker).history(
-                period="max",
-                auto_adjust=False,
-                actions=False,
-            )
-            if history is None or history.empty:
-                print(f"  {ticker}: no Yahoo Finance history; not registering")
-                continue
-
-            results.append({
-                "ticker": ticker,
-                **RETIRED_TICKERS[ticker],
-                "historical_only": True,
-            })
-            first_date = history.index.min().date()
-            last_date = history.index.max().date()
-            print(
-                f"  {ticker}: {len(history)} Yahoo rows "
-                f"({first_date} to {last_date}); historical-only"
-            )
-        except Exception as exc:
-            print(f"  {ticker}: Yahoo history check failed; not registering ({exc})")
-        time.sleep(0.3)
 
     return pd.DataFrame(results)
 
 
+def buildTickerCatalog() -> pd.DataFrame:
+    """Build the full catalog of historical S&P members plus the SPY benchmark."""
+    current = set(get_current_sp500_tickers())
+    all_members = set(get_sp500_tickers())
+    current_with_benchmark = sorted(current | {SP500_BENCHMARK_TICKER})
+    former = sorted(all_members - current)
+
+    current_df = fetchAllTickers(current_with_benchmark)
+    current_df["historical_only"] = False
+
+    former_records = []
+    for ticker in former:
+        former_records.append({
+            **_fallback_metadata(ticker),
+            "historical_only": True,
+        })
+
+    former_df = pd.DataFrame(former_records)
+    combined = pd.concat([current_df, former_df], ignore_index=True)
+    combined["ticker"] = combined["ticker"].astype(str).str.strip().str.upper()
+
+    if combined["ticker"].duplicated().any():
+        duplicates = sorted(combined.loc[
+            combined["ticker"].duplicated(keep=False), "ticker"
+        ].unique())
+        raise ValueError(f"Duplicate tickers in S&P 500 catalog: {duplicates}")
+
+    expected = all_members | {SP500_BENCHMARK_TICKER}
+    observed = set(combined["ticker"])
+    if observed != expected:
+        raise ValueError(
+            "S&P 500 catalog mismatch; "
+            f"missing={sorted(expected - observed)}, "
+            f"unexpected={sorted(observed - expected)}"
+        )
+
+    return combined
+
+
 def getExistingTickers(client: supabase.Client) -> set[str]:
-    """Get set of tickers already in database."""
-    response = client.table("stocks").select("ticker, is_active, created_at").execute()
-    return {row["ticker"] for row in response.data}
+    """Get all tickers already present in the stocks table."""
+    response = client.table("stocks").select("ticker").execute()
+    return {
+        str(row["ticker"]).strip().upper()
+        for row in (response.data or [])
+        if row.get("ticker")
+    }
 
 
 def getNowTimestamptz() -> str:
@@ -228,173 +137,97 @@ def getNowTimestamptz() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def uploadToSupabase(
+    df: pd.DataFrame,
+    client: supabase.Client,
+) -> tuple[int, int]:
+    """Upload current and historical-only catalog rows without resetting history."""
+    required = {"ticker", "name", "exchange", "sector", "industry", "historical_only"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Ticker catalog missing columns: {sorted(missing)}")
 
-def uploadToSupabase(df: pd.DataFrame, client: supabase.Client) -> tuple[int, int]:
-    """
-    Upload current and historical-only tickers separately.
-
-    Current tickers:
-        - Upsert with refreshed created_at.
-
-    Existing historical tickers:
-        - Update metadata without changing created_at.
-
-    New historical tickers:
-        - Insert without created_at, allowing the database default.
-
-    Returns (new_count, deactivated_count).
-    """
-    if not df.empty:
-        df = df.loc[~df["ticker"].map(is_excluded_ticker)].copy()
-
-    existingTickers = getExistingTickers(client)
-
-    if df.empty:
-        excluded_existing = {
-            ticker for ticker in existingTickers
-            if is_excluded_ticker(ticker)
-        }
-        for ticker in excluded_existing:
-            client.table("stocks").update(
-                {"is_active": False}
-            ).eq("ticker", ticker).execute()
-
-        return 0, len(excluded_existing)
-
+    existing = getExistingTickers(client)
     now = getNowTimestamptz()
-
     current_records = []
     historical_existing = []
     historical_new = []
-
-    newCount = 0
-    deactivatedCount = 0
-
-    print(f"\nExisting tickers in DB: {len(existingTickers)}")
-    print(f"Prepared tickers to upload: {len(df)}")
+    seen = set()
 
     for _, row in df.iterrows():
-        ticker = row["ticker"]
+        ticker = str(row["ticker"]).strip().upper()
+        if ticker in seen:
+            raise ValueError(f"Duplicate ticker in upload frame: {ticker}")
+        seen.add(ticker)
 
-        historical_flag = row.get("historical_only", False)
-        historical_only = (
-            bool(historical_flag)
-            if pd.notna(historical_flag)
-            else False
-        )
-
+        historical_only = bool(row["historical_only"])
         record = {
             "ticker": ticker,
-            "name": row["name"],
-            "exchange": row["exchange"],
-            "sector": row["sector"],
-            "industry": row["industry"],
+            "name": row["name"] or ticker,
+            "exchange": row["exchange"] or "Unknown",
+            "sector": row["sector"] or "Unknown",
+            "industry": row["industry"] or "Unknown",
             "is_active": not historical_only,
         }
 
-        if ticker not in existingTickers:
-            newCount += 1
-
-        if not historical_only:
+        if historical_only:
+            if ticker in existing:
+                historical_existing.append(record)
+            else:
+                historical_new.append(record)
+        else:
+            # Preserve the established current-catalog refresh semantics.
             record["created_at"] = now
             current_records.append(record)
 
-        elif ticker in existingTickers:
-            historical_existing.append(record)
-
-        else:
-            # Omit created_at entirely so PostgreSQL can apply
-            # its configured DEFAULT value.
-            historical_new.append(record)
-
-    # 1. Upsert current tickers.
     if current_records:
         client.table("stocks").upsert(
-            current_records,
-            on_conflict="ticker"
+            current_records, on_conflict="ticker"
         ).execute()
+        print(f"  Upserted {len(current_records)} current constituents/benchmark")
 
-        print(f"  Upserted {len(current_records)} current tickers")
-
-    # 2. Update existing historical tickers without touching created_at.
     for record in historical_existing:
         client.table("stocks").update(record).eq(
             "ticker", record["ticker"]
         ).execute()
-
     if historical_existing:
-        print(
-            f"  Updated {len(historical_existing)} existing "
-            "historical tickers"
-        )
+        print(f"  Updated {len(historical_existing)} former constituents")
 
-    # 3. Insert new historical tickers without created_at.
     if historical_new:
-        client.table("stocks").insert(
-            historical_new
+        client.table("stocks").insert(historical_new).execute()
+        print(f"  Inserted {len(historical_new)} former constituents")
+
+    # Keep non-S&P and non-benchmark rows for auditability, but mark them inactive.
+    missing_tickers = existing - seen
+    for ticker in sorted(missing_tickers):
+        client.table("stocks").update({"is_active": False}).eq(
+            "ticker", ticker
         ).execute()
 
-        print(f"  Inserted {len(historical_new)} new historical tickers")
-
-    # 4. Deactivate tickers no longer in the fetched universe.
-    fetchedTickers = set(df["ticker"].tolist())
-    missingTickers = existingTickers - fetchedTickers
-
-    if missingTickers:
-        print(
-            f"Deactivating {len(missingTickers)} "
-            "tickers no longer in fetched list..."
-        )
-
-        for ticker in missingTickers:
-            client.table("stocks").update(
-                {"is_active": False}
-            ).eq("ticker", ticker).execute()
-
-            deactivatedCount += 1
-
-        print(f"  Deactivated {deactivatedCount} tickers")
-
-    return newCount, deactivatedCount
+    print(f"  Deactivated {len(missing_tickers)} tickers outside the configured universe")
+    return len(current_records) + len(historical_new), len(missing_tickers)
 
 
 def main() -> None:
-    """Main entry point."""
-    # Load environment variables
-    supabaseUrl = os.getenv("SUPABASE_URL")
-    supabaseKey = os.getenv("SUPABASE_KEY")
+    """Refresh the current S&P catalog and register all former constituents."""
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY")
 
-    if not supabaseUrl or not supabaseKey:
+    if not supabase_url or not supabase_key:
         raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in .env.secrets")
 
-    # Initialize Supabase client
-    client = supabase.create_client(supabaseUrl, supabaseKey)
-
-    # Enforce the exclusion in the database too; do not let a catalog refresh
-    # reactivate symbols whose price history was intentionally removed.
-    client.table("stocks").update({"is_active": False}).in_(
-        "ticker", sorted(EXCLUDED_TICKERS)
-    ).execute()
-
-    # Fetch the current universe and a separate, verified historical-only
-    # catalog. Retired symbols remain inactive but are available for backfills.
-    live_df = fetchAllTickers(ALL_TICKERS)
-    retired_df = fetchRetiredTickerInfo()
-    df = pd.concat([live_df, retired_df], ignore_index=True)
-
-    if df.empty:
-        print("No current or historical tickers fetched, nothing to upload")
-        return
+    client = supabase.create_client(supabase_url, supabase_key)
+    catalog = buildTickerCatalog()
+    current_count = int((~catalog["historical_only"]).sum())
+    historical_count = int(catalog["historical_only"].sum())
 
     print(
-        f"Prepared {len(live_df)} current tickers and "
-        f"{len(retired_df)} retired tickers with available history"
+        f"Prepared {current_count} current constituents/benchmark and "
+        f"{historical_count} former S&P 500 constituents "
+        f"({catalog['ticker'].nunique()} unique tickers total)"
     )
-
-    # Upload current symbols as active and retired symbols as inactive.
-    newCount, deactivatedCount = uploadToSupabase(df, client)
-
-    print(f"\nDone! New: {newCount}, Deactivated: {deactivatedCount}")
+    new_count, deactivated_count = uploadToSupabase(catalog, client)
+    print(f"\nDone! New: {new_count}, Deactivated: {deactivated_count}")
 
 
 if __name__ == "__main__":
