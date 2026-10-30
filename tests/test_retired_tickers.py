@@ -21,7 +21,8 @@ def test_fetch_retired_ticker_info_requires_yahoo_history_and_respects_cutoff(mo
             assert kwargs["start"] == "2000-01-01"
             assert kwargs["auto_adjust"] is False
             assert kwargs["actions"] is False
-            assert kwargs["raise_errors"] is True
+            assert getattr(self, "_tz", None) == "America/New_York"
+            assert "raise_errors" not in kwargs
             if self.ticker == "ATVI":
                 return pd.DataFrame()
             return pd.DataFrame(
