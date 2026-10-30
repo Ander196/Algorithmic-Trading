@@ -199,12 +199,17 @@ def fetchRetiredTickerInfo() -> pd.DataFrame:
 
             # Bound the request to the original listing's final trading day.
             # This avoids symbol reuse (e.g. APC) and later OTC-only quotes.
-            history = yf.Ticker(ticker).history(
+            yahoo_ticker = yf.Ticker(ticker)
+            # All symbols in RETIRED_TICKERS were US-listed equities. Yahoo
+            # sometimes omits timezone metadata for delisted symbols, causing
+            # yfinance to stop before requesting the explicit historical range.
+            # Supply their known exchange timezone so the chart request can run.
+            yahoo_ticker._tz = "America/New_York"
+            history = yahoo_ticker.history(
                 start="2000-01-01",
                 end=end_exclusive,
                 auto_adjust=False,
                 actions=False,
-                raise_errors=True,
             )
             if history is None or history.empty:
                 print(
