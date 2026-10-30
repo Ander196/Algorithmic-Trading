@@ -24,8 +24,14 @@ import supabase
 import yfinance as yf
 from dotenv import load_dotenv
 
-from data.excluded_tickers import is_excluded_ticker, normalize_ticker
+from data.excluded_tickers import normalize_ticker
 from data.price_validation import validate_ohlcv_frame
+from data.sp500_universe import (
+    SP500_BENCHMARK_TICKER,
+    filter_sp500_price_rows,
+    get_current_sp500_tickers,
+    get_yfinance_symbol,
+)
 
 load_dotenv(".env.secrets")
 
@@ -58,19 +64,19 @@ def getSupabaseClient() -> supabase.Client:
 
 
 def getActiveTickers(client: supabase.Client) -> list[str]:
-    """Fetch all active tickers from stocks table."""
+    """Fetch current S&P 500 members plus the SPY benchmark."""
     response = (
         client.table("stocks")
         .select("ticker")
         .eq("is_active", True)
         .execute()
     )
-    return [
+    allowed = set(get_current_sp500_tickers()) | {SP500_BENCHMARK_TICKER}
+    return sorted({
         normalize_ticker(row["ticker"])
         for row in (response.data or [])
-        if row.get("ticker") and not is_excluded_ticker(row["ticker"])
-    ]
-
+        if row.get("ticker") and normalize_ticker(row["ticker"]) in allowed
+    })
 
 def getLatestPriceDate(client: supabase.Client, ticker: str) -> datetime | None:
     """Get the latest price_date existing in stock_prices for a given ticker."""
@@ -94,7 +100,7 @@ def fetchPriceData(
     """Fetch OHLCV data from yfinance for a date range."""
     for attempt in range(retries):
         try:
-            stock = yf.Ticker(ticker)
+            stock = yf.Ticker(get_yfinance_symbol(ticker))
             # Request the total-return-adjusted OHLC basis explicitly. Older
             # rows were ingested using yfinance's version-dependent default;
             # in this project's current environment that default adjusted OHLC.
@@ -174,21 +180,20 @@ def uploadToSupabase(
     df: pd.DataFrame,
     batchSize: int = 500,
 ) -> int:
-    """Upload price data to Supabase."""
+    """Upload only current/benchmark prices allowed by the S&P membership file."""
     ticker = normalize_ticker(ticker)
-    if is_excluded_ticker(ticker):
-        print(f"  {ticker}: refusing to upload excluded price history")
-        return 0
+    if ticker == SP500_BENCHMARK_TICKER:
+        eligible = df.copy()
+    else:
+        eligible = filter_sp500_price_rows(df, ticker)
 
-    df = validate_ohlcv_frame(df, ticker)
-    if df is None or df.empty:
+    eligible = validate_ohlcv_frame(eligible, ticker)
+    if eligible is None or eligible.empty:
         return 0
-
 
     records = []
     now = datetime.now(timezone.utc).isoformat()
-
-    for _, row in df.iterrows():
+    for _, row in eligible.iterrows():
         records.append({
             "ticker": ticker,
             "price_date": row["price_date"],
@@ -196,7 +201,11 @@ def uploadToSupabase(
             "high": float(row["high"]),
             "low": float(row["low"]),
             "close": float(row["close"]),
-            "adj_close": float(row["adj_close"]) if pd.notna(row["adj_close"]) else float(row["close"]),
+            "adj_close": (
+                float(row["adj_close"])
+                if pd.notna(row["adj_close"])
+                else float(row["close"])
+            ),
             "volume": int(row["volume"]),
             "inserted_at": now,
         })
@@ -211,9 +220,6 @@ def uploadToSupabase(
             inserted += len(batch)
             continue
         except Exception as exc:
-            # Retry individually to isolate unique-key conflicts from genuine
-            # persistence errors; a failed batch is not itself proof every row
-            # failed, because some rows may already exist.
             print(f"    Batch insert for {ticker} failed; retrying rows individually: {exc}")
 
         for record in batch:
@@ -227,17 +233,13 @@ def uploadToSupabase(
                     failures.append(f"{record['price_date']}: {exc}")
 
     if duplicates:
-        print(f"    {ticker}: skipped {duplicates} row(s) already present (unique-key conflicts)")
+        print(f"    {ticker}: skipped {duplicates} existing row(s)")
     if failures:
         sample = "; ".join(failures[:5])
-        remainder = len(failures) - min(len(failures), 5)
-        suffix = f"; and {remainder} more" if remainder else ""
         raise PriceUploadError(
-            f"{ticker}: failed to insert {len(failures)} row(s); {sample}{suffix}"
+            f"{ticker}: failed to insert {len(failures)} row(s); {sample}"
         )
-
     return inserted
-
 
 def _build_daily_ingestion_window(
     now: datetime, latest_date: datetime | None
