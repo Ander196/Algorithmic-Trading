@@ -1,0 +1,24 @@
+-- Read-only preview of APC/SBNY rows outside their valid S&P 500 price windows.
+-- APC: [2000-01-01, 2019-08-09)
+-- SBNY: [2021-12-20, 2023-03-11), last traded on 2023-03-10.
+
+SELECT
+    ticker,
+    COUNT(*) AS rows_to_remove,
+    MIN(price_date) AS first_price_date,
+    MAX(price_date) AS last_price_date
+FROM public.stock_prices
+WHERE
+    (ticker = 'APC' AND NOT (
+        price_date >= DATE '2000-01-01'
+        AND price_date < DATE '2019-08-09'
+    ))
+    OR
+    (ticker = 'SBNY' AND NOT (
+        price_date >= DATE '2021-12-20'
+        AND price_date < DATE '2023-03-11'
+    ))
+GROUP BY ticker
+ORDER BY ticker;
+
+-- This query must return zero rows after running cleanup_apc_sbny_outside_sp500.sql.
