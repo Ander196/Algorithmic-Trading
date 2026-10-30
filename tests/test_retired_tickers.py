@@ -46,10 +46,10 @@ def test_ticker_catalog_contains_every_historical_constituent_and_spy(monkeypatc
 
 
 def test_fetch_all_tickers_keeps_symbols_even_when_yahoo_metadata_is_missing(monkeypatch):
-    def fake_fetch(_ticker):
+    def fake_fetch(ticker):
         return {
-            "ticker": "NOQUOTE",
-            "name": "NOQUOTE",
+            "ticker": ticker,
+            "name": ticker,
             "exchange": "Unknown",
             "sector": "Unknown",
             "industry": "Unknown",
