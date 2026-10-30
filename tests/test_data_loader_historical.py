@@ -99,19 +99,19 @@ def test_upload_filters_prices_outside_membership_periods():
     captured = []
     prices = pd.DataFrame({
         "ticker": ["SBNY"] * 3,
-        "price_date": ["2021-12-20", "2023-03-14", "2024-01-02"],
-        "open": [1.0, 2.0, 3.0],
-        "high": [1.1, 2.1, 3.1],
-        "low": [0.9, 1.9, 2.9],
-        "close": [1.0, 2.0, 3.0],
-        "adj_close": [1.0, 2.0, 3.0],
-        "volume": [100, 200, 300],
+        "price_date": ["2021-12-20", "2023-03-10", "2023-03-14", "2024-01-02"],
+        "open": [1.0, 2.0, 2.5, 3.0],
+        "high": [1.1, 2.1, 2.6, 3.1],
+        "low": [0.9, 1.9, 2.4, 2.9],
+        "close": [1.0, 2.0, 2.5, 3.0],
+        "adj_close": [1.0, 2.0, 2.5, 3.0],
+        "volume": [100, 200, 250, 300],
     })
 
     assert loader.uploadToSupabase(FakeClient(), "SBNY", prices) == 2
     assert [row["price_date"] for row in captured] == [
         "2021-12-20",
-        "2023-03-14",
+        "2023-03-10",
     ]
 
 
