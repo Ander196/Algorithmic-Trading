@@ -5,101 +5,76 @@ import pytest
 
 from data import data_loader_historical as historical_loader
 from data import ticker_loader
-from data.retired_tickers import RETIRED_TICKERS
+from data.sp500_universe import (
+    SP500_BENCHMARK_TICKER,
+    get_current_sp500_tickers,
+    get_sp500_tickers,
+)
 
 
-def test_fetch_retired_ticker_info_requires_yahoo_history_and_respects_cutoff(monkeypatch):
-    calls = []
+def test_ticker_catalog_contains_every_historical_constituent_and_spy(monkeypatch):
+    def fake_fetch_all(tickers, **_kwargs):
+        return pd.DataFrame([
+            {
+                "ticker": ticker,
+                "name": ticker,
+                "exchange": "TEST",
+                "sector": "Test",
+                "industry": "Test",
+            }
+            for ticker in tickers
+        ])
 
-    class FakeTicker:
-        def __init__(self, ticker):
-            self.ticker = ticker
+    monkeypatch.setattr(ticker_loader, "fetchAllTickers", fake_fetch_all)
+    catalog = ticker_loader.buildTickerCatalog()
 
-        def history(self, **kwargs):
-            calls.append((self.ticker, kwargs))
-            assert kwargs["start"] == "2000-01-01"
-            assert kwargs["auto_adjust"] is False
-            assert kwargs["actions"] is False
-            assert kwargs["raise_errors"] is True
-            if self.ticker == "ATVI":
-                return pd.DataFrame()
-            return pd.DataFrame(
-                {"Close": [10.0]},
-                index=pd.to_datetime(["2020-01-02"]),
-            )
+    expected = set(get_sp500_tickers()) | {SP500_BENCHMARK_TICKER}
+    assert set(catalog["ticker"]) == expected
+    assert len(catalog) == len(expected)
+    assert len(expected) > 1_100
 
-    monkeypatch.setattr(ticker_loader.yf, "Ticker", FakeTicker)
-    monkeypatch.setattr(ticker_loader.time, "sleep", lambda *_: None)
-    monkeypatch.setattr(
-        ticker_loader,
-        "RETIRED_TICKERS",
-        {"SPLK": RETIRED_TICKERS["SPLK"], "ATVI": RETIRED_TICKERS["ATVI"]},
+    current = set(get_current_sp500_tickers())
+    actual_current = set(
+        catalog.loc[~catalog["historical_only"], "ticker"]
     )
+    assert actual_current == current | {SP500_BENCHMARK_TICKER}
 
-    result = ticker_loader.fetchRetiredTickerInfo()
+    former = set(catalog.loc[catalog["historical_only"], "ticker"])
+    assert {"APC", "SBNY", "QRVO", "WBD"}.issubset(former)
+    assert "QQQ" not in expected
+    assert "ULVR.L" not in expected
 
-    assert result["ticker"].tolist() == ["SPLK"]
-    assert bool(result.iloc[0]["historical_only"]) is True
-    assert calls[0][1]["end"].date().isoformat() == "2024-03-16"
 
-
-def test_fetch_all_tickers_skips_historical_only_symbols(monkeypatch):
-    fetched = []
-
-    def fake_fetch(ticker):
-        fetched.append(ticker)
+def test_fetch_all_tickers_keeps_symbols_even_when_yahoo_metadata_is_missing(monkeypatch):
+    def fake_fetch(_ticker):
         return {
-            "ticker": ticker,
-            "name": ticker,
-            "exchange": "NMS",
-            "sector": "Test",
-            "industry": "Test",
+            "ticker": "NOQUOTE",
+            "name": "NOQUOTE",
+            "exchange": "Unknown",
+            "sector": "Unknown",
+            "industry": "Unknown",
         }
 
     monkeypatch.setattr(ticker_loader, "fetchTickerInfo", fake_fetch)
-    monkeypatch.setattr(ticker_loader.time, "sleep", lambda *_: None)
 
     result = ticker_loader.fetchAllTickers(
-        ["AAPL", "SPLK", "TWTR", "WBD"],
+        ["NOQUOTE", "AAPL"],
         delay=0,
+        batchSize=1,
     )
-
-    assert fetched == ["AAPL"]
-    assert result["ticker"].tolist() == ["AAPL"]
+    assert set(result["ticker"]) == {"NOQUOTE", "AAPL"}
 
 
-def test_historical_loader_includes_registered_retired_symbols(monkeypatch):
-    class FakeQuery:
-        def select(self, *_args):
-            return self
-
-        def execute(self):
-            return SimpleNamespace(data=[
-                {"ticker": "AAPL", "is_active": True},
-                {"ticker": "SPLK", "is_active": False},
-                {"ticker": "WBD", "is_active": False},
-                {"ticker": "OLD", "is_active": False},
-            ])
-
-    class FakeClient:
-        def table(self, name):
-            assert name == "stocks"
-            return FakeQuery()
-
-    monkeypatch.setattr(
-        historical_loader,
-        "RETIRED_TICKERS",
-        {"SPLK": RETIRED_TICKERS["SPLK"]},
-    )
-
-    assert historical_loader.getActiveTickers(FakeClient()) == ["AAPL", "SPLK"]
+def test_historical_loader_includes_full_snp_universe_and_spy():
+    tickers = historical_loader.getActiveTickers(object())
+    assert set(tickers) == set(get_sp500_tickers()) | {SP500_BENCHMARK_TICKER}
 
 
-
-def test_upload_keeps_retired_tickers_inactive(monkeypatch):
+def test_upload_keeps_former_members_inactive_and_does_not_reset_created_at():
     class FakeQuery:
         def __init__(self, client):
             self.client = client
+            self.ticker = None
 
         def select(self, *_args):
             return self
@@ -108,41 +83,62 @@ def test_upload_keeps_retired_tickers_inactive(monkeypatch):
             return SimpleNamespace(data=self.client.existing_rows)
 
         def upsert(self, records, on_conflict=None):
-            self.client.upserted_records = records
+            self.client.upserted_records.extend(records)
+            return self
+
+        def update(self, record):
+            self.client.updated_records.append(record)
+            return self
+
+        def insert(self, records):
+            self.client.inserted_records.extend(records)
+            return self
+
+        def eq(self, column, value):
+            self.ticker = value
             return self
 
     class FakeClient:
         def __init__(self):
             self.existing_rows = [{"ticker": "AAPL", "is_active": True}]
             self.upserted_records = []
+            self.updated_records = []
+            self.inserted_records = []
 
-        def table(self, name):
-            assert name == "stocks"
+        def table(self, _name):
             return FakeQuery(self)
 
     client = FakeClient()
-    df = pd.DataFrame([
+    frame = pd.DataFrame([
         {
             "ticker": "AAPL",
             "name": "Apple Inc.",
             "exchange": "NMS",
             "sector": "Technology",
             "industry": "Consumer Electronics",
+            "historical_only": False,
         },
         {
             "ticker": "SPLK",
-            **RETIRED_TICKERS["SPLK"],
+            "name": "Splunk",
+            "exchange": "Unknown",
+            "sector": "Unknown",
+            "industry": "Unknown",
             "historical_only": True,
         },
     ])
 
-    ticker_loader.uploadToSupabase(df, client)
+    ticker_loader.uploadToSupabase(frame, client)
 
-    records = {record["ticker"]: record for record in client.upserted_records}
-    assert records["AAPL"]["is_active"] is True
-    assert "created_at" in records["AAPL"]
-    assert records["SPLK"]["is_active"] is False
-    assert "created_at" not in records["SPLK"]
+    current = client.upserted_records[0]
+    retired = client.inserted_records[0]
+    assert current["ticker"] == "AAPL"
+    assert current["is_active"] is True
+    assert "created_at" in current
+    assert retired["ticker"] == "SPLK"
+    assert retired["is_active"] is False
+    assert "created_at" not in retired
+
 
 @pytest.mark.parametrize("module", [ticker_loader, historical_loader])
 def test_supabase_clients_require_privileged_key(monkeypatch, module):
