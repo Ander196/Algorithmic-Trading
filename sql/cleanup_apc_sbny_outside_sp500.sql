@@ -30,7 +30,7 @@ ORDER BY ticker;
 
 -- Keep a restorable copy of the complete rows before deleting them.
 CREATE TABLE IF NOT EXISTS public.stock_prices_sp500_cleanup_backup
-    (LIKE public.stock_prices INCLUDING DEFAULTS);
+    (LIKE public.stock_prices INCLUDING ALL);
 
 INSERT INTO public.stock_prices_sp500_cleanup_backup
 SELECT *
