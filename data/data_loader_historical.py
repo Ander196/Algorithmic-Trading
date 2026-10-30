@@ -1,12 +1,11 @@
 """
-Historical OHLCV loader for active and curated retired tickers.
+Historical OHLCV loader for every S&P 500 constituent since 2000.
 
 The loader:
-- reads active tickers and registered historical-only symbols from stocks;
+- processes all point-in-time membership intervals plus SPY as benchmark;
 - preserves existing history in stock_prices;
-- backfills from 2000-01-01 where history is missing;
-- fetches recent data from the latest stored date through today;
-- excludes tickers known to have invalid historical prices.
+- backfills only dates when a ticker belonged to the index and traded;
+- clips curated retired securities at their last actual trading date.
 
 Usage:
     python -m data.data_loader_historical
@@ -422,7 +421,7 @@ def processTicker(
     return result
 
 def main() -> None:
-    """Load maximum available history for active and registered retired tickers."""
+    """Load all available S&P 500 membership history plus the SPY benchmark."""
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -446,7 +445,7 @@ def main() -> None:
 
     client = getSupabaseClient()
     tickers = getActiveTickers(client)
-    print(f"Found {len(tickers)} eligible tickers (active plus registered retired)\n")
+    print(f"Found {len(tickers)} eligible S&P 500 historical tickers plus SPY\n")
 
     totalInserted = 0
     totalFetched = 0
