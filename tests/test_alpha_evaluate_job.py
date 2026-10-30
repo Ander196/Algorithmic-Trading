@@ -83,9 +83,12 @@ def test_get_alpha_universe_ignores_current_activity_and_excludes_market() -> No
         ]
     )
 
-    # Current activity is irrelevant to historical eligibility. QRVO's valid
-    # stored history is retained, while known unusable histories stay excluded.
-    assert get_alpha_universe(client, "SPY") == ["AAA", "BBB", "QRVO"]
+    # The historical membership file defines the universe, not stocks.is_active.
+    universe = set(get_alpha_universe(client, "SPY"))
+    assert {"APC", "SBNY", "QRVO", "WBD", "AAPL"}.issubset(universe)
+    assert "SPY" not in universe
+    assert "AAA" not in universe
+    assert "ULVR.L" not in universe
 
 
 def test_load_alpha_inputs_records_first_and_last_usable_price_dates(monkeypatch) -> None:
@@ -281,3 +284,44 @@ def test_print_diagnostics_writes_reviewable_csv_files(tmp_path) -> None:
         "alpha_universe_coverage.csv",
     }
     assert expected_files.issubset({path.name for path in tmp_path.iterdir()})
+
+
+
+def test_alpha_dataset_does_not_bridge_a_membership_exit_and_reentry():
+    from core.alpha_dataset import AlphaDatasetConfig
+    from jobs.evaluate_alpha import build_sp500_alpha_dataset
+
+    first = pd.bdate_range("2010-01-04", "2013-09-20")
+    second = pd.bdate_range("2017-03-20", "2019-12-31")
+    dates = first.append(second)
+    close = pd.Series(range(100, 100 + len(dates)), index=dates, dtype=float)
+    history = pd.DataFrame({
+        "open": close - 0.5,
+        "high": close + 1.0,
+        "low": close - 1.0,
+        "close": close,
+        "volume": 1_000_000.0,
+    }, index=dates)
+    market_close = pd.Series(100.0 + pd.RangeIndex(len(dates)), index=dates)
+    market = pd.DataFrame({
+        "open": market_close,
+        "high": market_close + 1,
+        "low": market_close - 1,
+        "close": market_close,
+        "volume": 10_000_000.0,
+    }, index=dates)
+
+    dataset = build_sp500_alpha_dataset(
+        {"AMD": history},
+        market,
+        config=AlphaDatasetConfig(
+            horizon_days=5,
+            min_history=252,
+            market_ticker="SPY",
+        ),
+    )
+
+    signal_dates = pd.DatetimeIndex(dataset.index.get_level_values("date"))
+    assert ((signal_dates < pd.Timestamp("2013-09-23")) | (
+        signal_dates >= pd.Timestamp("2017-03-20")
+    )).all()
