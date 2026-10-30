@@ -1,23 +1,26 @@
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from data import data_loader_historical as historical_loader
 from data import ticker_loader
 from data.retired_tickers import RETIRED_TICKERS
 
 
-def test_fetch_retired_ticker_info_requires_yahoo_history(monkeypatch):
+def test_fetch_retired_ticker_info_requires_yahoo_history_and_respects_cutoff(monkeypatch):
+    calls = []
+
     class FakeTicker:
         def __init__(self, ticker):
             self.ticker = ticker
 
         def history(self, **kwargs):
-            assert kwargs == {
-                "period": "max",
-                "auto_adjust": False,
-                "actions": False,
-            }
+            calls.append((self.ticker, kwargs))
+            assert kwargs["start"] == "2000-01-01"
+            assert kwargs["auto_adjust"] is False
+            assert kwargs["actions"] is False
+            assert kwargs["raise_errors"] is True
             if self.ticker == "ATVI":
                 return pd.DataFrame()
             return pd.DataFrame(
@@ -37,6 +40,7 @@ def test_fetch_retired_ticker_info_requires_yahoo_history(monkeypatch):
 
     assert result["ticker"].tolist() == ["SPLK"]
     assert bool(result.iloc[0]["historical_only"]) is True
+    assert calls[0][1]["end"].date().isoformat() == "2024-03-16"
 
 
 def test_fetch_all_tickers_skips_historical_only_symbols(monkeypatch):
@@ -139,3 +143,30 @@ def test_upload_keeps_retired_tickers_inactive(monkeypatch):
     assert "created_at" in records["AAPL"]
     assert records["SPLK"]["is_active"] is False
     assert "created_at" not in records["SPLK"]
+
+@pytest.mark.parametrize("module", [ticker_loader, historical_loader])
+def test_supabase_clients_require_privileged_key(monkeypatch, module):
+    captured = {}
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "public-anon-key")
+
+    with pytest.raises(ValueError, match="SUPABASE_KEY"):
+        module.getSupabaseClient()
+
+    monkeypatch.setenv("SUPABASE_KEY", "sb_test_only")
+
+    def fake_create_client(url, key):
+        captured["url"] = url
+        captured["key"] = key
+        return "fake-client"
+
+    monkeypatch.setattr(module.supabase, "create_client", fake_create_client)
+
+    assert module.getSupabaseClient() == "fake-client"
+    assert captured == {
+        "url": "https://example.supabase.co",
+        "key": "sb_test_only",
+    }

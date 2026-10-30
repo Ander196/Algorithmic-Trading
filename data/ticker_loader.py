@@ -7,9 +7,9 @@ US and European exchanges and uploads to Supabase `stocks` table.
 Usage:
     python ticker_loader.py
 
-Environment variables required in .env:
+Environment variables required in .env.secrets:
     SUPABASE_URL=https://your-project.supabase.co
-    SUPABASE_ANON_KEY=your-anon-key
+    SUPABASE_KEY=your-anon-key
 """
 
 import os
@@ -302,10 +302,10 @@ def main() -> None:
     """Main entry point."""
     # Load environment variables
     supabaseUrl = os.getenv("SUPABASE_URL")
-    supabaseKey = os.getenv("SUPABASE_ANON_KEY")
+    supabaseKey = os.getenv("SUPABASE_KEY")
 
     if not supabaseUrl or not supabaseKey:
-        raise ValueError("SUPABASE_URL and SUPABASE_ANON_KEY must be set in .env")
+        raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in .env.secrets")
 
     # Initialize Supabase client
     client = supabase.create_client(supabaseUrl, supabaseKey)
