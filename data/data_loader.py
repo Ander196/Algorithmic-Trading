@@ -16,7 +16,7 @@ Environment variables required in .env.secrets:
 
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -31,6 +31,7 @@ from data.sp500_universe import (
     filter_sp500_price_rows,
     get_current_sp500_tickers,
     get_yfinance_symbol,
+    is_sp500_member,
 )
 
 load_dotenv(".env.secrets")
@@ -287,8 +288,8 @@ def processTicker(client: supabase.Client, ticker: str) -> dict[str, Any]:
         "error": None,
     }
 
-    if is_excluded_ticker(ticker):
-        print(f"  {ticker}: excluded due to known invalid price history")
+    if ticker != SP500_BENCHMARK_TICKER and not is_sp500_member(ticker, date.today()):
+        print(f"  {ticker}: not a current S&P 500 constituent")
         result["skipped"] = 1
         return result
 
