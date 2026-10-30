@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
 
@@ -99,7 +98,7 @@ def get_sp500_tickers() -> list[str]:
 
 
 def get_current_sp500_tickers(as_of: date | str | pd.Timestamp | None = None) -> list[str]:
-    """Return S&P 500 constituents for one date (today when omitted)."""
+    """Return S&P 500 constituents for one date (snapshot date when omitted)."""
     day = _as_date(as_of or SP500_MEMBERSHIP_AS_OF)
     current = {
         period.ticker
