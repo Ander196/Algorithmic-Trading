@@ -98,7 +98,7 @@ def test_upload_filters_prices_outside_membership_periods():
 
     captured = []
     prices = pd.DataFrame({
-        "ticker": ["SBNY"] * 3,
+        "ticker": ["SBNY"] * 4,
         "price_date": ["2021-12-20", "2023-03-10", "2023-03-14", "2024-01-02"],
         "open": [1.0, 2.0, 2.5, 3.0],
         "high": [1.1, 2.1, 2.6, 3.1],
