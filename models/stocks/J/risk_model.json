@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "model_type": "StockRiskModel",
+  "ticker": "J",
+  "market_model_version": "5fc152f98c5acde5",
+  "created_at": "2026-10-31T17:30:19.696958+00:00",
+  "config": {
+    "vol_window": 21,
+    "beta_window": 63,
+    "min_scalar": 0.25,
+    "max_scalar": 1.0,
+    "beta_penalty_strength": 0.3,
+    "turbulent_beta_penalty": 1.25
+  },
+  "model_version": "d4c4a4674533c785"
+}
