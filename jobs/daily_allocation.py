@@ -20,7 +20,10 @@ from core.hmm_market import MarketRegimeClassifier
 from core.stock_risk import AllocationEngine, StockRiskConfig, StockRiskModel
 from data.data_loader import getActiveTickers
 from data.excluded_tickers import is_excluded_ticker
-from data.risk_history import fetch_pre_membership_price_history
+from data.risk_history import (
+    DEFAULT_PRE_MEMBERSHIP_LOOKBACK_DAYS,
+    fetch_pre_membership_price_history,
+)
 from data.sp500_universe import get_sp500_price_periods
 from jobs.common import fetch_price_history, get_supabase_client
 from storage.client import storeAllocationResult, storeStockRiskModel
@@ -132,7 +135,12 @@ def _augment_stock_history_for_beta(
         )
         return stock_history, 0
 
-    lookback_days = int(os.getenv("RISK_PRE_MEMBERSHIP_LOOKBACK_DAYS", "180"))
+    lookback_days = int(
+        os.getenv(
+            "RISK_PRE_MEMBERSHIP_LOOKBACK_DAYS",
+            str(DEFAULT_PRE_MEMBERSHIP_LOOKBACK_DAYS),
+        )
+    )
     auxiliary = fetch_pre_membership_price_history(
         ticker,
         membership_start,
