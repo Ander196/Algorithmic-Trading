@@ -43,7 +43,7 @@ def test_process_ticker_uses_naive_exchange_date_boundaries(
     monkeypatch.setattr(data_loader, "getLatestPriceDate", lambda _client, _ticker: latest_date)
     monkeypatch.setattr(data_loader, "fetchPriceData", fake_fetch_price_data)
 
-    result = data_loader.processTicker(object(), "AAA")
+    result = data_loader.processTicker(object(), "AAPL")
 
     assert result["error"] is None
     assert result["skipped"] == 0
