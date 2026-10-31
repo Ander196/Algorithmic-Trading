@@ -1,24 +1,23 @@
--- READ ONLY: classify stock_prices rows outside the point-in-time S&P 500 universe.
+-- OPTIMIZED, READ ONLY preview for stock_prices outside point-in-time S&P 500 membership.
 --
--- Generated from:
+-- Sources:
 --   data/sp500_membership.csv blob 0bcd24e88d94cefdddca62ffd01a96103a7016f7
 --   data/retired_tickers.py last_trade_date entries
 --
--- Rules match data.sp500_universe.get_sp500_price_periods():
---   * start_date inclusive; end_date_exclusive exclusive
---   * all re-entry periods retained
---   * the final period of retired symbols clipped to last_trade_date + 1
---   * SPY retained as the project benchmark from 2000-01-01
+-- Uses the existing (ticker, price_date) index via bounded LATERAL range lookups.
+-- It does not scan/group the complete stock_prices table.
 --
--- QQQ is intentionally labelled manual_review_benchmark, not a delete candidate.
--- It tracks the Nasdaq-100 and may be stored as a comparative benchmark.
+-- Intervals are start-inclusive/end-exclusive; re-entries are respected.
+-- The final interval of retired symbols is clipped to last_trade_date + 1,
+-- matching data.sp500_universe.get_sp500_price_periods().
+-- SPY is retained as project benchmark. QQQ is reported separately as manual
+-- benchmark review and is not included in delete-candidate detail by default.
 --
--- This query is SELECT-only. It does not create tables or mutate stock_prices.
+-- This query is SELECT-only: no persistent objects are created or modified.
 --
--- Default RUN A: result_mode='summary' returns ticker/reason counts.
--- RUN B: result_mode='detail', optionally set ticker_filter='EQT' (or another
---        ticker), to export the exact candidate rows for review.
--- To inspect QQQ details, also set include_manual_review_in_detail = TRUE.
+-- SUMMARY: keep result_mode='summary'. Optional ticker_filter can narrow it.
+-- DETAIL: set result_mode='detail' and ticker_filter to one ticker (recommended).
+--         For QQQ detail also set include_manual_review_in_detail=TRUE.
 
 WITH
 params AS (
@@ -1200,15 +1199,16 @@ membership_ranked AS (
         ROW_NUMBER() OVER (
             PARTITION BY m.ticker
             ORDER BY m.start_date DESC
-        ) AS period_rank
+        ) AS reverse_period_rank
     FROM membership_raw AS m
 ),
-membership AS (
+membership_effective AS (
     SELECT
         m.ticker,
         m.start_date,
         CASE
-            WHEN c.last_trade_date IS NOT NULL AND m.period_rank = 1
+            WHEN c.last_trade_date IS NOT NULL
+                 AND m.reverse_period_rank = 1
             THEN CASE
                 WHEN m.end_date_exclusive IS NULL
                     THEN c.last_trade_date + 1
@@ -1218,93 +1218,150 @@ membership AS (
         END AS end_date_exclusive
     FROM membership_ranked AS m
     LEFT JOIN last_trade_cutoffs AS c USING (ticker)
+    WHERE
+        CASE
+            WHEN c.last_trade_date IS NOT NULL
+                 AND m.reverse_period_rank = 1
+            THEN CASE
+                WHEN m.end_date_exclusive IS NULL
+                    THEN c.last_trade_date + 1
+                ELSE LEAST(m.end_date_exclusive, c.last_trade_date + 1)
+            END
+            ELSE m.end_date_exclusive
+        END IS NULL
+        OR
+        CASE
+            WHEN c.last_trade_date IS NOT NULL
+                 AND m.reverse_period_rank = 1
+            THEN CASE
+                WHEN m.end_date_exclusive IS NULL
+                    THEN c.last_trade_date + 1
+                ELSE LEAST(m.end_date_exclusive, c.last_trade_date + 1)
+            END
+            ELSE m.end_date_exclusive
+        END > m.start_date
 ),
-membership_ranked_with_cutoffs AS (
+membership_sequence AS (
     SELECT
         m.ticker,
         m.start_date,
         m.end_date_exclusive,
-        ROW_NUMBER() OVER (
+        LEAD(m.start_date) OVER (
             PARTITION BY m.ticker
-            ORDER BY m.start_date DESC
-        ) AS period_rank
-    FROM membership AS m
+            ORDER BY m.start_date
+        ) AS next_start_date
+    FROM membership_effective AS m
 ),
-membership_bounds AS (
-    SELECT
-        ticker,
-        MIN(start_date) AS first_membership_date,
-        MAX(end_date_exclusive) FILTER (
-            WHERE period_rank = 1
-        ) AS final_membership_end_exclusive
-    FROM membership_ranked_with_cutoffs
+membership_first AS (
+    SELECT ticker, MIN(start_date) AS first_start_date
+    FROM membership_effective
     GROUP BY ticker
 ),
-price_rows AS (
+membership_last AS (
+    SELECT DISTINCT ON (ticker)
+        ticker,
+        end_date_exclusive AS final_end_exclusive
+    FROM membership_effective
+    ORDER BY ticker, start_date DESC
+),
+candidate_ranges_base (
+    ticker,
+    classification,
+    range_start_inclusive,
+    range_end_exclusive
+) AS (
+    -- Price rows before the ticker's first S&P 500 membership period.
+    SELECT
+        ticker,
+        'before_first_membership'::text,
+        '-infinity'::date,
+        first_start_date
+    FROM membership_first
+
+    UNION ALL
+
+    -- Gaps between consecutive membership periods (e.g. EQT's exit/re-entry).
+    SELECT
+        ticker,
+        'between_membership_periods'::text,
+        end_date_exclusive,
+        next_start_date
+    FROM membership_sequence
+    WHERE end_date_exclusive IS NOT NULL
+      AND next_start_date IS NOT NULL
+      AND end_date_exclusive < next_start_date
+
+    UNION ALL
+
+    -- Rows after the final (possibly retired-symbol-clipped) period.
+    SELECT
+        ticker,
+        'after_final_membership'::text,
+        final_end_exclusive,
+        'infinity'::date
+    FROM membership_last
+    WHERE final_end_exclusive IS NOT NULL
+
+    UNION ALL
+
+    -- Symbols in the database catalog that never had a recorded S&P interval.
+    -- Benchmarks are excluded from this delete-candidate class.
+    SELECT
+        s.ticker,
+        'never_member'::text,
+        '-infinity'::date,
+        'infinity'::date
+    FROM public.stocks AS s
+    WHERE s.ticker NOT IN ('SPY', 'QQQ')
+      AND NOT EXISTS (
+          SELECT 1
+          FROM membership_effective AS m
+          WHERE m.ticker = s.ticker
+      )
+
+    UNION ALL
+
+    -- Keep QQQ visible for review, but never treat it as an automatic delete.
+    SELECT
+        s.ticker,
+        'manual_review_benchmark'::text,
+        '-infinity'::date,
+        'infinity'::date
+    FROM public.stocks AS s
+    WHERE s.ticker = 'QQQ'
+),
+candidate_ranges AS (
+    SELECT r.*
+    FROM candidate_ranges_base AS r
+    CROSS JOIN params AS p
+    WHERE p.ticker_filter IS NULL
+       OR r.ticker = UPPER(TRIM(p.ticker_filter))
+),
+candidate_rows AS (
+    -- Each range is disjoint. The equality on ticker and bounded date
+    -- predicates allow an index range scan using idx_sp_ticker_date /
+    -- uq_stock_prices_ticker_date instead of a full-table classification.
     SELECT
         p.id AS price_id,
         p.ticker,
         p.price_date,
-        p.open,
-        p.high,
-        p.low,
-        p.close,
-        p.adj_close,
-        p.volume,
-        p.inserted_at,
-        CASE
-            WHEN p.ticker = 'SPY'
-                 AND p.price_date >= DATE '2000-01-01'
-                THEN 'benchmark_keep'
-            WHEN p.ticker = 'QQQ'
-                THEN 'manual_review_benchmark'
-            WHEN EXISTS (
-                SELECT 1
-                FROM membership AS m
-                WHERE m.ticker = p.ticker
-                  AND p.price_date >= m.start_date
-                  AND (
-                      m.end_date_exclusive IS NULL
-                      OR p.price_date < m.end_date_exclusive
-                  )
-            )
-                THEN 'inside_membership_keep'
-            WHEN b.ticker IS NULL
-                THEN 'never_member'
-            WHEN p.price_date < b.first_membership_date
-                THEN 'before_first_membership'
-            WHEN b.final_membership_end_exclusive IS NOT NULL
-                 AND p.price_date >= b.final_membership_end_exclusive
-                THEN 'after_final_membership'
-            ELSE 'between_membership_periods'
-        END AS classification
-    FROM public.stock_prices AS p
-    LEFT JOIN membership_bounds AS b USING (ticker)
-),
-ticker_totals AS (
-    SELECT ticker, COUNT(*) AS total_ticker_rows
-    FROM price_rows
-    GROUP BY ticker
-),
-classification_summary AS (
-    SELECT
-        ticker,
-        classification,
-        COUNT(*) AS rows_in_classification,
-        MIN(price_date) AS first_date,
-        MAX(price_date) AS last_date
-    FROM price_rows
-    WHERE classification NOT IN ('benchmark_keep', 'inside_membership_keep')
-    GROUP BY ticker, classification
+        r.classification
+    FROM candidate_ranges AS r
+    JOIN LATERAL (
+        SELECT sp.id, sp.ticker, sp.price_date
+        FROM public.stock_prices AS sp
+        WHERE sp.ticker = r.ticker
+          AND sp.price_date >= r.range_start_inclusive
+          AND sp.price_date < r.range_end_exclusive
+    ) AS p ON TRUE
 )
 SELECT
     'summary'::text AS record_type,
-    s.ticker,
-    s.classification,
-    t.total_ticker_rows,
-    s.rows_in_classification,
-    s.first_date,
-    s.last_date,
+    r.ticker,
+    r.classification,
+    COUNT(*)::bigint AS rows_in_classification,
+    MIN(r.price_date) AS first_date,
+    MAX(r.price_date) AS last_date,
     NULL::bigint AS price_id,
     NULL::date AS price_date,
     NULL::numeric AS open,
@@ -1314,14 +1371,10 @@ SELECT
     NULL::numeric AS adj_close,
     NULL::bigint AS volume,
     NULL::timestamptz AS inserted_at
-FROM classification_summary AS s
-JOIN ticker_totals AS t USING (ticker)
+FROM candidate_rows AS r
 CROSS JOIN params AS p
 WHERE p.result_mode = 'summary'
-  AND (
-      p.ticker_filter IS NULL
-      OR s.ticker = UPPER(TRIM(p.ticker_filter))
-  )
+GROUP BY r.ticker, r.classification
 
 UNION ALL
 
@@ -1329,30 +1382,25 @@ SELECT
     'detail'::text AS record_type,
     r.ticker,
     r.classification,
-    t.total_ticker_rows,
     NULL::bigint AS rows_in_classification,
     NULL::date AS first_date,
     NULL::date AS last_date,
-    r.price_id,
-    r.price_date,
-    r.open,
-    r.high,
-    r.low,
-    r.close,
-    r.adj_close,
-    r.volume,
-    r.inserted_at
-FROM price_rows AS r
-JOIN ticker_totals AS t USING (ticker)
+    sp.id AS price_id,
+    sp.price_date,
+    sp.open,
+    sp.high,
+    sp.low,
+    sp.close,
+    sp.adj_close,
+    sp.volume,
+    sp.inserted_at
+FROM candidate_rows AS r
+JOIN public.stock_prices AS sp
+  ON sp.id = r.price_id
 CROSS JOIN params AS p
 WHERE p.result_mode = 'detail'
-  AND r.classification NOT IN ('benchmark_keep', 'inside_membership_keep')
   AND (
       r.classification <> 'manual_review_benchmark'
       OR p.include_manual_review_in_detail
-  )
-  AND (
-      p.ticker_filter IS NULL
-      OR r.ticker = UPPER(TRIM(p.ticker_filter))
   )
 ORDER BY record_type, ticker, classification, price_date NULLS FIRST, price_id;
