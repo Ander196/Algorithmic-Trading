@@ -1219,15 +1219,6 @@ membership AS (
     FROM membership_ranked AS m
     LEFT JOIN last_trade_cutoffs AS c USING (ticker)
 ),
-membership_bounds AS (
-    SELECT
-        ticker,
-        MIN(start_date) AS first_membership_date,
-        MAX(end_date_exclusive) FILTER (
-            WHERE period_rank = 1
-        ) AS final_membership_end_exclusive
-    FROM membership_ranked_with_cutoffs
-),
 membership_ranked_with_cutoffs AS (
     SELECT
         m.ticker,
@@ -1238,6 +1229,16 @@ membership_ranked_with_cutoffs AS (
             ORDER BY m.start_date DESC
         ) AS period_rank
     FROM membership AS m
+),
+membership_bounds AS (
+    SELECT
+        ticker,
+        MIN(start_date) AS first_membership_date,
+        MAX(end_date_exclusive) FILTER (
+            WHERE period_rank = 1
+        ) AS final_membership_end_exclusive
+    FROM membership_ranked_with_cutoffs
+    GROUP BY ticker
 ),
 price_rows AS (
     SELECT
