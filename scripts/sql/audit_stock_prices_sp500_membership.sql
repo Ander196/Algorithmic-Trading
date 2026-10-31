@@ -1,21 +1,20 @@
 -- READ ONLY: audit stock_prices against the point-in-time S&P 500 universe.
 --
--- Source of truth:
---   data/sp500_membership.csv (1,148 intervals; start inclusive/end exclusive)
---   data/retired_tickers.py (last actual trading dates for curated retired symbols)
+-- Sources (master snapshot used to generate these VALUES):
+--   data/sp500_membership.csv, blob 0bcd24e88d94cefdddca62ffd01a96103a7016f7
+--   data/retired_tickers.py, last_trade_date entries
 --
--- SPY is treated as the project benchmark and is allowed from 2000-01-01 onward.
--- Re-entry periods are respected. For retired_tickers.py entries, the final
--- membership interval is clipped to last_trade_date + 1, matching
--- data.sp500_universe.get_sp500_price_periods().
+-- Membership intervals are start-inclusive/end-exclusive; re-entries are kept.
+-- The final interval of curated retired symbols is clipped to last_trade_date + 1,
+-- matching data.sp500_universe.get_sp500_price_periods().
+-- SPY is allowed continuously from 2000-01-01 as the project benchmark.
 --
--- This query does not create, update, or delete any persistent data.
+-- No persistent data is created, updated, or deleted.
 --
--- Run 1: keep result_mode='summary' to get one row per ticker with out-of-universe
---        counts and date bounds.
--- Run 2: switch result_mode='detail' and optionally set ticker_filter (e.g. 'ASML.AS')
---        to export the original stock_prices rows outside the point-in-time universe.
---        Set ticker_filter to NULL to return all details (potentially a large result).
+-- RUN A (default): result_mode='summary' returns one row per affected ticker.
+-- RUN B: set result_mode='detail' to return original rows outside membership.
+--        Set ticker_filter='ASML.AS' (or another symbol) to restrict details;
+--        leave it NULL to export all out-of-universe rows (large result).
 
 WITH
 params AS (
@@ -1216,6 +1215,8 @@ membership AS (
     LEFT JOIN last_trade_cutoffs AS c USING (ticker)
 ),
 price_rows AS (
+    -- The membership ranges are non-overlapping (validated by sp500_universe.py),
+    -- so this LEFT JOIN retains exactly one output row per stored price row.
     SELECT
         p.id AS price_id,
         p.ticker,
@@ -1229,18 +1230,16 @@ price_rows AS (
         p.inserted_at,
         (
             (p.ticker = 'SPY' AND p.price_date >= DATE '2000-01-01')
-            OR EXISTS (
-                SELECT 1
-                FROM membership AS m
-                WHERE m.ticker = p.ticker
-                  AND p.price_date >= m.start_date
-                  AND (
-                      m.end_date_exclusive IS NULL
-                      OR p.price_date < m.end_date_exclusive
-                  )
-            )
+            OR m.ticker IS NOT NULL
         ) AS in_point_in_time_universe
     FROM public.stock_prices AS p
+    LEFT JOIN membership AS m
+      ON m.ticker = p.ticker
+     AND p.price_date >= m.start_date
+     AND (
+         m.end_date_exclusive IS NULL
+         OR p.price_date < m.end_date_exclusive
+     )
 ),
 ticker_summary AS (
     SELECT
