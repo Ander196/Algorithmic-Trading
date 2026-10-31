@@ -353,8 +353,8 @@ def test_non_eur_fx_keeps_using_yahoo(monkeypatch) -> None:
 
 
 
-def test_export_prices_excludes_wbd_before_fetching_supabase_history(monkeypatch, tmp_path) -> None:
-    dates = pd.bdate_range("2026-04-01", periods=100)
+def test_export_prices_excludes_wbd_after_its_snp_exit(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-05-01", "2026-12-31")
     requested = []
 
     def fake_fetch_adjusted(_client, ticker, _start):
@@ -370,10 +370,11 @@ def test_export_prices_excludes_wbd_before_fetching_supabase_history(monkeypatch
 
     predictions_path = tmp_path / "predictions.csv"
     output_path = tmp_path / "prices.csv"
+    signal_date = pd.Timestamp("2026-10-09")
     pd.DataFrame({
-        "date": [dates[65], dates[65], dates[65], dates[66]],
-        "ticker": ["AAPL", "WBD", "QRVO", "AAPL"],
-        "expected_excess_return": [0.01, 0.99, 1.50, 0.02],
+        "date": [signal_date, signal_date, signal_date],
+        "ticker": ["AAPL", "WBD", "MSFT"],
+        "expected_excess_return": [0.01, 0.99, 0.02],
     }).to_csv(predictions_path, index=False)
 
     export_job.export_prices(
@@ -384,6 +385,6 @@ def test_export_prices_excludes_wbd_before_fetching_supabase_history(monkeypatch
     )
 
     result = pd.read_csv(output_path)
-    assert set(requested) == {"AAPL", "QRVO", "SPY"}
+    assert set(requested) == {"AAPL", "MSFT", "SPY"}
     assert "WBD" not in set(result["ticker"])
-    assert "QRVO" in set(result["ticker"])
+    assert {"AAPL", "MSFT"}.issubset(set(result["ticker"]))
