@@ -184,6 +184,32 @@ def filter_sp500_price_rows(
     return frame.loc[keep].copy()
 
 
+def filter_sp500_membership_rows(
+    frame: pd.DataFrame,
+    ticker_column: str = "ticker",
+    date_column: str = "price_date",
+) -> pd.DataFrame:
+    """Keep rows only when each ticker was an S&P 500 constituent on that date.
+
+    This is intended for date/ticker prediction or price frames that contain
+    more than one symbol. Each ticker's re-entry windows are handled separately.
+    """
+    missing = {ticker_column, date_column} - set(frame.columns)
+    if missing:
+        raise ValueError(f"Missing S&P membership columns: {sorted(missing)}")
+    if frame.empty:
+        return frame.copy()
+
+    filtered_frames = [
+        filter_sp500_price_rows(group, ticker, date_column=date_column)
+        for ticker, group in frame.groupby(ticker_column, sort=False)
+    ]
+    non_empty = [part for part in filtered_frames if not part.empty]
+    if not non_empty:
+        return frame.iloc[0:0].copy()
+    return pd.concat(non_empty).sort_index()
+
+
 def get_yfinance_symbol(ticker: str) -> str:
     """Translate a canonical S&P ticker to the Yahoo Finance symbol."""
     normalized = str(ticker).strip().upper()
@@ -197,6 +223,7 @@ __all__ = [
     "SP500_MEMBERSHIP_AS_OF",
     "YFINANCE_TICKER_ALIASES",
     "filter_sp500_price_rows",
+    "filter_sp500_membership_rows",
     "get_current_sp500_tickers",
     "get_sp500_membership_periods",
     "get_sp500_price_periods",
