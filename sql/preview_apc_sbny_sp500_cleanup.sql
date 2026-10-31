@@ -1,6 +1,7 @@
--- Read-only preview of APC/SBNY rows outside their valid S&P 500 price windows.
--- APC: [2000-01-01, 2019-08-09)
--- SBNY: [2021-12-20, 2023-03-11), last traded on 2023-03-10.
+-- Read-only preview of APC/SBNY/QRVO rows outside their valid S&P 500 price windows.
+-- APC: [2000-01-01, 2019-08-09), last traded 2019-08-08.
+-- SBNY: [2021-12-20, 2023-03-11), last traded 2023-03-10.
+-- QRVO: [2015-06-12, 2024-12-23), final included date 2024-12-20.
 
 SELECT
     ticker,
@@ -17,6 +18,11 @@ WHERE
     (ticker = 'SBNY' AND NOT (
         price_date >= DATE '2021-12-20'
         AND price_date < DATE '2023-03-11'
+    ))
+    OR
+    (ticker = 'QRVO' AND NOT (
+        price_date >= DATE '2015-06-12'
+        AND price_date < DATE '2024-12-23'
     ))
 GROUP BY ticker
 ORDER BY ticker;
