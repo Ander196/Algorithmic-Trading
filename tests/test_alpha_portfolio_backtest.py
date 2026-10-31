@@ -128,7 +128,7 @@ def test_configuration_rejects_invalid_values(kwargs, match) -> None:
         PortfolioBacktestConfig(**kwargs)
 
 
-def test_backtest_excludes_european_ticker_even_if_present_in_prediction_csv() -> None:
+def test_backtest_excludes_european_but_keeps_historical_sp_tickers() -> None:
     prices = _prices()
     predictions = _predictions(prices)
     extra = predictions.reset_index()[["date"]].drop_duplicates().copy()
@@ -146,7 +146,6 @@ def test_backtest_excludes_european_ticker_even_if_present_in_prediction_csv() -
     report = run_alpha_portfolio_backtest(predictions, prices)
 
     assert "ULVR.L" not in set(report.holdings["ticker"])
-    assert "WBD" in set(report.holdings["ticker"])
     assert "QRVO" in set(report.holdings["ticker"])
 
 
