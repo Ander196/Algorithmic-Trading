@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +20,11 @@ from core.hmm_market import MarketRegimeClassifier
 from core.stock_risk import AllocationEngine, StockRiskConfig, StockRiskModel
 from data.data_loader import getActiveTickers
 from data.excluded_tickers import is_excluded_ticker
+from data.risk_history import (
+    DEFAULT_PRE_MEMBERSHIP_LOOKBACK_DAYS,
+    fetch_pre_membership_price_history,
+)
+from data.sp500_universe import get_sp500_price_periods
 from jobs.common import fetch_price_history, get_supabase_client
 from storage.client import storeAllocationResult, storeStockRiskModel
 
@@ -73,6 +79,100 @@ def _warm_market_model(model: MarketRegimeClassifier, history: pd.DataFrame):
     return state
 
 
+def _join_stock_market_history(
+    market_history: pd.DataFrame,
+    stock_history: pd.DataFrame,
+) -> pd.DataFrame:
+    """Align stock and benchmark closes on identical trading sessions."""
+    return market_history[["price_date", "close"]].rename(
+        columns={"close": "market_close"}
+    ).merge(
+        stock_history[["price_date", "close"]].rename(columns={"close": "stock_close"}),
+        on="price_date",
+        how="inner",
+    ).sort_values("price_date")
+
+
+def _current_membership_start(ticker: str, as_of_date) -> date | None:
+    """Return the S&P membership interval active on the latest benchmark date."""
+    latest_day = pd.Timestamp(as_of_date).date()
+    for period in get_sp500_price_periods(ticker):
+        if (
+            period.start_date <= latest_day
+            and (
+                period.end_date_exclusive is None
+                or latest_day < period.end_date_exclusive
+            )
+        ):
+            return period.start_date
+    return None
+
+
+def _augment_stock_history_for_beta(
+    ticker: str,
+    market_history: pd.DataFrame,
+    stock_history: pd.DataFrame,
+    minimum_sessions: int,
+) -> tuple[pd.DataFrame, int]:
+    """Add transient pre-membership bars only when the live beta window is short.
+
+    Auxiliary rows remain in memory and are consumed only by the Layer 2 risk
+    model. They are never uploaded to Supabase or passed to Alpha/backtest code.
+    """
+    current_joined = _join_stock_market_history(market_history, stock_history)
+    if len(current_joined) >= minimum_sessions or stock_history.empty:
+        return stock_history, 0
+
+    membership_start = _current_membership_start(
+        ticker,
+        market_history["price_date"].max(),
+    )
+    if membership_start is None:
+        logger.warning(
+            "%s: cannot resolve the current S&P membership interval; "
+            "skipping auxiliary risk-history fetch",
+            ticker,
+        )
+        return stock_history, 0
+
+    lookback_days = int(
+        os.getenv(
+            "RISK_PRE_MEMBERSHIP_LOOKBACK_DAYS",
+            str(DEFAULT_PRE_MEMBERSHIP_LOOKBACK_DAYS),
+        )
+    )
+    auxiliary = fetch_pre_membership_price_history(
+        ticker,
+        membership_start,
+        lookback_days=lookback_days,
+        reference_history=stock_history,
+    )
+    if auxiliary is None or auxiliary.empty:
+        return stock_history, 0
+
+    auxiliary = auxiliary.copy()
+    auxiliary["price_date"] = pd.to_datetime(auxiliary["price_date"], utc=True)
+    membership_start_utc = pd.Timestamp(membership_start, tz="UTC")
+    # Enforce the membership boundary at the point of use as well as in the
+    # provider helper; only observations strictly before entry may be included.
+    auxiliary = auxiliary.loc[
+        auxiliary["price_date"] < membership_start_utc
+    ].copy()
+
+    if auxiliary.empty:
+        return stock_history, 0
+
+    current = stock_history.copy()
+    current["price_date"] = pd.to_datetime(current["price_date"], utc=True)
+    combined = pd.concat([auxiliary, current], ignore_index=True, sort=False)
+    combined = (
+        combined.sort_values("price_date")
+        .drop_duplicates("price_date", keep="last")
+        .reset_index(drop=True)
+    )
+    return combined, len(auxiliary)
+
+
 def _calculate_stock(
     market_state,
     market_model_version: str,
@@ -81,18 +181,43 @@ def _calculate_stock(
     stock_history: pd.DataFrame,
     model_dir: Path,
 ):
-    joined = market_history[["price_date", "close"]].rename(
-        columns={"close": "market_close"}
-    ).merge(
-        stock_history[["price_date", "close"]].rename(columns={"close": "stock_close"}),
-        on="price_date",
-        how="inner",
-    ).sort_values("price_date")
-
     config = StockRiskConfig()
     minimum = config.beta_window + 1
+    current_common_sessions = len(
+        _join_stock_market_history(market_history, stock_history)
+    )
+    auxiliary_bars = 0
+
+    if current_common_sessions < minimum:
+        try:
+            stock_history, auxiliary_bars = _augment_stock_history_for_beta(
+                ticker,
+                market_history,
+                stock_history,
+                minimum,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"only {current_common_sessions} current common sessions; "
+                f"need {minimum}; transient pre-membership history failed: {exc}"
+            ) from exc
+
+    joined = _join_stock_market_history(market_history, stock_history)
+    if auxiliary_bars:
+        logger.info(
+            "%s: Layer 2 risk warm-up augmented with %d transient pre-membership "
+            "bars; common sessions current=%d combined=%d",
+            ticker,
+            auxiliary_bars,
+            current_common_sessions,
+            len(joined),
+        )
     if len(joined) < minimum:
-        raise RuntimeError(f"only {len(joined)} common sessions; need {minimum}")
+        raise RuntimeError(
+            f"only {len(joined)} common sessions after transient risk warm-up "
+            f"(current={current_common_sessions}, auxiliary_stock_bars={auxiliary_bars}); "
+            f"need {minimum}"
+        )
 
     model_path = model_dir / ticker / "risk_model.json"
     if model_path.exists():
