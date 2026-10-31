@@ -154,8 +154,8 @@ def test_augment_stock_history_uses_transient_pre_membership_bars(monkeypatch):
     current_history = _history_frame(current_dates, close_start=200.0)
     # Include the entry date in the mocked provider data to exercise the caller's
     # second boundary check; the current in-membership close must win the merge.
-    provider_dates = auxiliary_dates.append(
-        pd.DatetimeIndex([pd.Timestamp(membership_start, tz="UTC")])
+    provider_dates = pd.DatetimeIndex(
+        list(auxiliary_dates) + [pd.Timestamp(membership_start, tz="UTC")]
     )
     auxiliary_history = _history_frame(provider_dates, close_start=10.0)
     calls = []
