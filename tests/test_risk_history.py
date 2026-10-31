@@ -59,6 +59,45 @@ def test_fetch_pre_membership_history_is_adjusted_and_excludes_entry_date(monkey
     ]
 
 
+
+
+
+def test_fetch_pre_membership_history_calibrates_to_stored_price_basis(monkeypatch):
+    calls = []
+
+    class FakeTicker:
+        def history(self, **kwargs):
+            calls.append(kwargs)
+            return _provider_frame(
+                pd.to_datetime(["2026-10-06", "2026-10-07", "2026-10-08"])
+            )
+
+    monkeypatch.setattr(risk_history.yf, "Ticker", lambda _symbol: FakeTicker())
+    reference = pd.DataFrame(
+        {
+            "price_date": pd.to_datetime(["2026-10-08"], utc=True),
+            "close": [25.0],
+        }
+    )
+
+    result = risk_history.fetch_pre_membership_price_history(
+        "SKYD",
+        date(2026, 10, 8),
+        lookback_days=180,
+        retries=1,
+        reference_history=reference,
+    )
+
+    assert calls[0]["end"] == pd.Timestamp("2026-10-09", tz="UTC").to_pydatetime()
+    assert result["price_date"].dt.strftime("%Y-%m-%d").tolist() == [
+        "2026-10-06",
+        "2026-10-07",
+    ]
+    # First overlapping Yahoo close is 12.5; stored close is 25.0.
+    assert result["close"].tolist() == pytest.approx([21.0, 23.0])
+    assert result["open"].tolist() == pytest.approx([20.0, 22.0])
+
+
 def test_fetch_pre_membership_history_rejects_empty_provider_response(monkeypatch):
     class FakeTicker:
         def history(self, **kwargs):
@@ -129,8 +168,8 @@ def test_augment_stock_history_uses_transient_pre_membership_bars(monkeypatch):
         ],
     )
 
-    def fake_fetch(ticker, start, *, lookback_days):
-        calls.append((ticker, start, lookback_days))
+    def fake_fetch(ticker, start, *, lookback_days, reference_history):
+        calls.append((ticker, start, lookback_days, len(reference_history)))
         return auxiliary_history
 
     monkeypatch.setattr(
@@ -150,7 +189,7 @@ def test_augment_stock_history_uses_transient_pre_membership_bars(monkeypatch):
         combined,
     )
 
-    assert calls == [("SKYD", membership_start, 180)]
+    assert calls == [("SKYD", membership_start, 180, len(current_history))]
     assert extra_bars == 50
     assert len(joined) == len(current_dates) + 50
     assert combined["price_date"].is_unique
