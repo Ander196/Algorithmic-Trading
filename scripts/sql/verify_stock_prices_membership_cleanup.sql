@@ -1,14 +1,10 @@
 -- READ-ONLY post-cleanup verification for batch
 -- a6a2a11d-5dd6-4aa1-bb3e-202610310001
 --
--- Expected immediately after the cleanup, before any unrelated new ingestion:
---   public.stock_prices total rows: 2,507,757
---   archival backup rows:          234,487
---   live rows matching original backup id: 0
---   live rows matching original ticker/date key: 0
---
--- If another ingestion job ran after cleanup, total_stock_prices may be higher.
--- The batch-specific checks remain valid and should still report zero live keys.
+-- Run this file as one SQL statement. The output is a unified list of checks.
+-- Immediately after cleanup (before later ingestion), stock_prices was expected
+-- to contain 2,507,757 rows. The total check uses a minimum because new valid
+-- rows may have been ingested since cleanup.
 --
 -- This script performs SELECT statements only.
 
@@ -43,9 +39,7 @@ live_metrics AS (
         COUNT(*) AS total_stock_prices_rows,
         COUNT(*) FILTER (
             WHERE EXISTS (
-                SELECT 1
-                FROM batch b
-                WHERE b.original_id = p.id
+                SELECT 1 FROM batch b WHERE b.original_id = p.id
             )
         ) AS remaining_original_ids,
         COUNT(*) FILTER (
@@ -77,13 +71,25 @@ sample_actual AS (
       ON p.ticker = e.ticker
     GROUP BY e.ticker, e.expected_rows, e.purpose
 ),
+category_actual AS (
+    SELECT
+        b.classification,
+        COUNT(*) AS backed_up_rows,
+        COUNT(p.id) AS matching_live_ticker_date_keys
+    FROM batch AS b
+    LEFT JOIN public.stock_prices AS p
+      ON p.ticker = b.ticker
+     AND p.price_date = b.price_date
+    GROUP BY b.classification
+),
 results AS (
     SELECT
         'batch_integrity'::text AS check_group,
         'backup_rows'::text AS check_name,
         m.backup_rows::bigint AS actual_value,
         234487::bigint AS expected_value,
-        (m.backup_rows = 234487) AS passed
+        (m.backup_rows = 234487) AS passed,
+        'Must match all rows in the archived batch'::text AS note
     FROM batch_metrics AS m
 
     UNION ALL
@@ -92,7 +98,8 @@ results AS (
         'distinct_original_ids',
         m.distinct_original_ids,
         234487,
-        (m.distinct_original_ids = 234487)
+        (m.distinct_original_ids = 234487),
+        'One unique original primary key per backup row'
     FROM batch_metrics AS m
 
     UNION ALL
@@ -101,7 +108,8 @@ results AS (
         'distinct_ticker_dates',
         m.distinct_ticker_dates,
         234487,
-        (m.distinct_ticker_dates = 234487)
+        (m.distinct_ticker_dates = 234487),
+        'One unique ticker/date key per backup row'
     FROM batch_metrics AS m
 
     UNION ALL
@@ -110,7 +118,8 @@ results AS (
         'before_first_membership',
         m.before_first_rows,
         215403,
-        (m.before_first_rows = 215403)
+        (m.before_first_rows = 215403),
+        'Original audited class count'
     FROM batch_metrics AS m
 
     UNION ALL
@@ -119,7 +128,8 @@ results AS (
         'between_membership_periods',
         m.between_period_rows,
         19054,
-        (m.between_period_rows = 19054)
+        (m.between_period_rows = 19054),
+        'Original audited class count'
     FROM batch_metrics AS m
 
     UNION ALL
@@ -128,7 +138,8 @@ results AS (
         'after_final_membership',
         m.after_final_rows,
         30,
-        (m.after_final_rows = 30)
+        (m.after_final_rows = 30),
+        'Original audited class count'
     FROM batch_metrics AS m
 
     UNION ALL
@@ -137,7 +148,8 @@ results AS (
         'total_stock_prices_rows',
         l.total_stock_prices_rows,
         2507757,
-        (l.total_stock_prices_rows = 2507757)
+        (l.total_stock_prices_rows >= 2507757),
+        'Expected count immediately after cleanup; later valid ingestion may increase it'
     FROM live_metrics AS l
 
     UNION ALL
@@ -146,7 +158,8 @@ results AS (
         'remaining_original_ids',
         l.remaining_original_ids,
         0,
-        (l.remaining_original_ids = 0)
+        (l.remaining_original_ids = 0),
+        'No original backup primary key may remain in stock_prices'
     FROM live_metrics AS l
 
     UNION ALL
@@ -155,7 +168,8 @@ results AS (
         'remaining_original_ticker_date_keys',
         l.remaining_original_keys,
         0,
-        (l.remaining_original_keys = 0)
+        (l.remaining_original_keys = 0),
+        'No original backup ticker/date pair may remain in stock_prices'
     FROM live_metrics AS l
 
     UNION ALL
@@ -164,37 +178,45 @@ results AS (
         s.ticker,
         s.actual_rows,
         s.expected_rows,
-        (s.actual_rows = s.expected_rows)
+        (s.actual_rows = s.expected_rows),
+        s.purpose
     FROM sample_actual AS s
+
+    UNION ALL
+    SELECT
+        'per_category_live_keys',
+        c.classification,
+        c.matching_live_ticker_date_keys,
+        0,
+        (c.matching_live_ticker_date_keys = 0),
+        'All archived keys in this class should be absent from live stock_prices'
+    FROM category_actual AS c
+
+    UNION ALL
+    SELECT
+        'per_category_backup_rows',
+        c.classification,
+        c.backed_up_rows,
+        CASE c.classification
+            WHEN 'before_first_membership' THEN 215403
+            WHEN 'between_membership_periods' THEN 19054
+            WHEN 'after_final_membership' THEN 30
+        END,
+        CASE c.classification
+            WHEN 'before_first_membership' THEN c.backed_up_rows = 215403
+            WHEN 'between_membership_periods' THEN c.backed_up_rows = 19054
+            WHEN 'after_final_membership' THEN c.backed_up_rows = 30
+            ELSE FALSE
+        END,
+        'Archived rows in the backup batch by classification'
+    FROM category_actual AS c
 )
 SELECT
     check_group,
     check_name,
     actual_value,
     expected_value,
-    passed
+    passed,
+    note
 FROM results
 ORDER BY check_group, check_name;
-
--- Detailed sample report, easier to inspect manually.
-SELECT
-    s.ticker,
-    s.purpose,
-    s.expected_rows,
-    s.actual_rows,
-    (s.actual_rows = s.expected_rows) AS passed
-FROM sample_actual AS s
-ORDER BY s.ticker;
-
--- Per-category backup retention and live-key check.
-SELECT
-    b.classification,
-    COUNT(*) AS backed_up_rows,
-    COUNT(p.id) AS matching_live_ticker_date_keys,
-    COUNT(*) - COUNT(p.id) AS absent_from_live_table
-FROM batch AS b
-LEFT JOIN public.stock_prices AS p
-  ON p.ticker = b.ticker
- AND p.price_date = b.price_date
-GROUP BY b.classification
-ORDER BY b.classification;
