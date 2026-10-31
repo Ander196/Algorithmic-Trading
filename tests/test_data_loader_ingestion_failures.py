@@ -41,7 +41,7 @@ class FakeClient:
 def sample_frame():
     return pd.DataFrame(
         {
-            "ticker": ["AAA", "AAA"],
+            "ticker": ["AAPL", "AAPL"],
             "price_date": ["2026-10-15", "2026-10-16"],
             "open": [10.0, 11.0],
             "high": [12.0, 13.0],
@@ -59,7 +59,7 @@ def test_upload_counts_duplicate_rows_as_existing_not_as_inserted(monkeypatch):
         {"2026-10-15": Exception('duplicate key value violates unique constraint "uq_stock_prices_ticker_date" (23505)')}
     )
 
-    inserted = data_loader.uploadToSupabase(client, "AAA", sample_frame())
+    inserted = data_loader.uploadToSupabase(client, "AAPL", sample_frame())
 
     assert inserted == 1
 
@@ -68,7 +68,7 @@ def test_upload_raises_when_non_duplicate_row_insert_fails():
     client = FakeClient({"2026-10-15": RuntimeError("database unavailable")})
 
     with pytest.raises(data_loader.PriceUploadError, match="failed to insert 1 row"):
-        data_loader.uploadToSupabase(client, "AAA", sample_frame())
+        data_loader.uploadToSupabase(client, "AAPL", sample_frame())
 
 
 def test_duplicate_detection_uses_postgres_code():
