@@ -65,7 +65,11 @@ def test_price_filter_keeps_only_constituent_dates_and_reentries():
         "close": [1, 2, 3, 4],
     })
     filtered = filter_sp500_price_rows(frame, "AMD")
-    assert filtered["price_date"].tolist() == ["2012-01-03", "2018-01-03"]
+    assert filtered["price_date"].tolist() == [
+        "2012-01-03",
+        "2018-01-03",
+        "2019-01-03",
+    ]
 
 
 def test_yahoo_share_class_symbols_are_mapped_without_changing_db_ticker():
