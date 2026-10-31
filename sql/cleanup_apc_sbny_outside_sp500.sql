@@ -1,11 +1,12 @@
--- One-time cleanup: remove APC/SBNY prices outside their S&P 500 membership.
--- APC: membership [2000-01-01, 2019-08-09)
--- SBNY: membership [2021-12-20, 2023-03-15), last traded 2023-03-10
--- Price window therefore ends exclusively on 2023-03-11.
+-- One-time cleanup: remove APC/SBNY/QRVO prices outside their S&P membership.
+-- APC: membership [2000-01-01, 2019-08-09); last traded 2019-08-08.
+-- SBNY: membership [2021-12-20, 2023-03-15); last traded 2023-03-10.
+-- SBNY price window therefore ends exclusively on 2023-03-11.
+-- QRVO: membership [2015-06-12, 2024-12-23); final included date 2024-12-20.
 --
 -- Run in Supabase SQL Editor after reviewing the preview result.
 -- The backup table is retained so deleted rows can be inspected/restored.
--- This script does not delete valid APC/SBNY rows within their membership.
+-- This script does not delete valid APC/SBNY/QRVO rows within their membership.
 
 BEGIN;
 
@@ -28,6 +29,11 @@ WHERE
         price_date >= DATE '2021-12-20'
         AND price_date < DATE '2023-03-11'
     ))
+    OR
+    (ticker = 'QRVO' AND NOT (
+        price_date >= DATE '2015-06-12'
+        AND price_date < DATE '2024-12-23'
+    ))
 ON CONFLICT DO NOTHING;
 
 DELETE FROM public.stock_prices
@@ -40,6 +46,11 @@ WHERE
     (ticker = 'SBNY' AND NOT (
         price_date >= DATE '2021-12-20'
         AND price_date < DATE '2023-03-11'
+    ))
+    OR
+    (ticker = 'QRVO' AND NOT (
+        price_date >= DATE '2015-06-12'
+        AND price_date < DATE '2024-12-23'
     ));
 
 COMMIT;
@@ -56,5 +67,10 @@ WHERE
     (ticker = 'SBNY' AND NOT (
         price_date >= DATE '2021-12-20'
         AND price_date < DATE '2023-03-11'
+    ))
+    OR
+    (ticker = 'QRVO' AND NOT (
+        price_date >= DATE '2015-06-12'
+        AND price_date < DATE '2024-12-23'
     ))
 GROUP BY ticker;
