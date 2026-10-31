@@ -62,7 +62,7 @@ def test_invalid_inputs_are_rejected() -> None:
 
 
 
-def test_dataset_builder_excludes_retired_wbd_ticker():
+def test_dataset_builder_excludes_non_snp_european_ticker():
     stock = _bars(1)
     market = _bars(2)
     dataset = AlphaDatasetBuilder(
@@ -70,7 +70,7 @@ def test_dataset_builder_excludes_retired_wbd_ticker():
     ).build(
         {
             "AAA": stock,
-            "WBD": stock,
+            "ULVR.L": stock,
             "QRVO": _bars(4, periods=280),
             "BBB": _bars(3),
         },
@@ -79,7 +79,7 @@ def test_dataset_builder_excludes_retired_wbd_ticker():
 
     tickers = set(dataset.index.get_level_values("ticker"))
     assert tickers == {"AAA", "BBB", "QRVO"}
-    assert "WBD" not in tickers
+    assert "ULVR.L" not in tickers
     # A retained delisted symbol contributes only within its stored history.
     qrvo_dates = dataset.xs("QRVO", level="ticker").index
     assert qrvo_dates.max() < _bars(4, periods=280).index.max()
