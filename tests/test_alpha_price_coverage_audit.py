@@ -177,10 +177,10 @@ def test_render_repair_sql_is_idempotent_and_updates_only_invalid_rows() -> None
 
 
 
-def test_read_predictions_excludes_wbd_from_coverage_audit(tmp_path) -> None:
+def test_read_predictions_excludes_wbd_after_its_snp_exit(tmp_path) -> None:
     path = tmp_path / "predictions.csv"
     pd.DataFrame({
-        "date": ["2026-07-28", "2026-07-28", "2026-07-29"],
+        "date": ["2026-10-09", "2026-10-09", "2026-10-10"],
         "ticker": ["AAPL", "WBD", "WBD"],
     }).to_csv(path, index=False)
 
@@ -188,4 +188,4 @@ def test_read_predictions_excludes_wbd_from_coverage_audit(tmp_path) -> None:
 
     assert tickers == ["AAPL"]
     assert rows["ticker"].tolist() == ["AAPL"]
-    assert signal_dates.tolist() == [pd.Timestamp("2026-07-28")]
+    assert signal_dates.tolist() == [pd.Timestamp("2026-10-09")]
