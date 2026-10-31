@@ -93,9 +93,9 @@ def _join_stock_market_history(
     ).sort_values("price_date")
 
 
-def _current_membership_start(ticker: str, latest_stock_date) -> date | None:
-    """Return the start of the S&P membership interval containing the latest bar."""
-    latest_day = pd.Timestamp(latest_stock_date).date()
+def _current_membership_start(ticker: str, as_of_date) -> date | None:
+    """Return the S&P membership interval active on the latest benchmark date."""
+    latest_day = pd.Timestamp(as_of_date).date()
     for period in get_sp500_price_periods(ticker):
         if (
             period.start_date <= latest_day
@@ -125,7 +125,7 @@ def _augment_stock_history_for_beta(
 
     membership_start = _current_membership_start(
         ticker,
-        stock_history["price_date"].max(),
+        market_history["price_date"].max(),
     )
     if membership_start is None:
         logger.warning(
