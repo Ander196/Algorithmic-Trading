@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -89,7 +90,7 @@ def _join_stock_market_history(
     ).sort_values("price_date")
 
 
-def _current_membership_start(ticker: str, latest_stock_date) -> object | None:
+def _current_membership_start(ticker: str, latest_stock_date) -> date | None:
     """Return the start of the S&P membership interval containing the latest bar."""
     latest_day = pd.Timestamp(latest_stock_date).date()
     for period in get_sp500_price_periods(ticker):
@@ -136,6 +137,7 @@ def _augment_stock_history_for_beta(
         ticker,
         membership_start,
         lookback_days=lookback_days,
+        reference_history=stock_history,
     )
     if auxiliary is None or auxiliary.empty:
         return stock_history, 0
