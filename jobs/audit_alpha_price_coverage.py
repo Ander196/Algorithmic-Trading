@@ -15,6 +15,7 @@ import pandas as pd
 import yfinance as yf
 
 from data.excluded_tickers import filter_excluded_ticker_rows, is_excluded_ticker
+from data.sp500_universe import filter_sp500_membership_rows
 from jobs.common import get_supabase_client
 from jobs.export_alpha_adjusted_prices import _select_backtest_calendar
 
@@ -69,8 +70,13 @@ def _read_predictions(path: Path) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[
             "Excluding retired/invalid tickers from coverage audit: "
             + ", ".join(excluded_tickers)
         )
+    rows = filter_sp500_membership_rows(
+        rows, ticker_column="ticker", date_column="date"
+    )
     if rows.empty:
-        raise ValueError("predictions contain no eligible tickers after exclusions")
+        raise ValueError(
+            "predictions contain no tickers inside their historical S&P 500 membership windows"
+        )
     if rows.duplicated(["date", "ticker"]).any():
         raise ValueError("predictions CSV contains duplicate date/ticker rows")
     signal_dates = pd.DatetimeIndex(sorted(rows["date"].unique()))

@@ -1,12 +1,11 @@
 """
-Historical OHLCV loader for active and curated retired tickers.
+Historical OHLCV loader for every S&P 500 constituent since 2000.
 
 The loader:
-- reads active tickers and registered historical-only symbols from stocks;
+- processes all point-in-time membership intervals plus SPY as benchmark;
 - preserves existing history in stock_prices;
-- backfills from 2000-01-01 where history is missing;
-- fetches recent data from the latest stored date through today;
-- excludes tickers known to have invalid historical prices.
+- backfills only dates when a ticker belonged to the index and traded;
+- clips curated retired securities at their last actual trading date.
 
 Usage:
     python -m data.data_loader_historical
@@ -24,74 +23,66 @@ import supabase
 import yfinance as yf
 from dotenv import load_dotenv
 
-from data.excluded_tickers import is_excluded_ticker, normalize_ticker
-from data.retired_tickers import RETIRED_TICKERS
+from data.excluded_tickers import normalize_ticker
+from data.sp500_universe import (
+    MembershipPeriod,
+    SP500_BENCHMARK_TICKER,
+    SP500_HISTORY_START,
+    filter_sp500_price_rows,
+    get_sp500_price_periods,
+    get_sp500_tickers,
+    get_yfinance_symbol,
+)
 from data.price_validation import validate_ohlcv_frame
 
 load_dotenv(".env.secrets")
 
 # Retain enough history for Alpha while preventing future max-history backfills
 # from reintroducing observations that were intentionally removed.
-HISTORICAL_START_DATE = datetime(2000, 1, 1, tzinfo=timezone.utc)
+HISTORICAL_START_DATE = datetime.combine(SP500_HISTORY_START, datetime.min.time()).replace(tzinfo=timezone.utc)
 
 
 def getSupabaseClient() -> supabase.Client:
     """Initialize and return Supabase client."""
     supabaseUrl = os.getenv("SUPABASE_URL")
-    supabaseKey = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    supabaseKey = os.getenv("SUPABASE_KEY")
 
     if not supabaseUrl or not supabaseKey:
         raise ValueError(
-            "SUPABASE_URL and SUPABASE_KEY (or SUPABASE_ANON_KEY) "
-            "must be set in .env.secrets"
+            "SUPABASE_URL and SUPABASE_KEY must be set in .env.secrets"
         )
 
     return supabase.create_client(supabaseUrl, supabaseKey)
 
 
 def getActiveTickers(client: supabase.Client) -> list[str]:
-    """Fetch active tickers plus registered retired symbols for history backfills.
+    """Return every S&P 500 ticker from the historical point-in-time catalog.
 
-    Retired symbols remain inactive in the live catalog. Include them only when
-    ticker_loader has registered them after confirming Yahoo history, so price
-    inserts continue to satisfy the stocks foreign-key constraint.
+    ticker_loader.py must be run first so every symbol exists in stocks and
+    satisfies the stock_prices foreign key. SPY is additionally loaded as the
+    benchmark series; it is not treated as an index constituent.
     """
-    response = client.table("stocks").select("ticker, is_active").execute()
-    tickers = []
-    seen = set()
-
-    for row in (response.data or []):
-        raw_ticker = row.get("ticker")
-        if not raw_ticker:
-            continue
-        ticker = normalize_ticker(raw_ticker)
-        historical_only = ticker in RETIRED_TICKERS
-        if not row.get("is_active", False) and not historical_only:
-            continue
-        if is_excluded_ticker(ticker) or ticker in seen:
-            continue
-        tickers.append(ticker)
-        seen.add(ticker)
-
-    return tickers
-
+    return sorted(set(get_sp500_tickers()) | {SP500_BENCHMARK_TICKER})
 
 def getLatestPriceDate(
     client: supabase.Client,
     ticker: str,
+    start_date: str | None = None,
+    end_date_exclusive: str | None = None,
 ) -> datetime | None:
-    """Get the latest price_date existing in stock_prices for a ticker."""
-    response = (
+    """Get the latest stored price date inside an optional membership window."""
+    query = (
         client.table("stock_prices")
         .select("price_date")
         .eq("ticker", ticker.upper())
-        .order("price_date", desc=True)
-        .limit(1)
-        .execute()
     )
+    if start_date:
+        query = query.gte("price_date", start_date)
+    if end_date_exclusive:
+        query = query.lt("price_date", end_date_exclusive)
+    response = query.order("price_date", desc=True).limit(1).execute()
     if not response.data:
         return None
-
     return datetime.strptime(
         response.data[0]["price_date"], "%Y-%m-%d"
     ).replace(tzinfo=timezone.utc)
@@ -100,23 +91,25 @@ def getLatestPriceDate(
 def getEarliestPriceDate(
     client: supabase.Client,
     ticker: str,
+    start_date: str | None = None,
+    end_date_exclusive: str | None = None,
 ) -> datetime | None:
-    """Get the earliest price_date existing in stock_prices for a ticker."""
-    response = (
+    """Get the earliest stored price date inside an optional membership window."""
+    query = (
         client.table("stock_prices")
         .select("price_date")
         .eq("ticker", ticker.upper())
-        .order("price_date", desc=False)
-        .limit(1)
-        .execute()
     )
+    if start_date:
+        query = query.gte("price_date", start_date)
+    if end_date_exclusive:
+        query = query.lt("price_date", end_date_exclusive)
+    response = query.order("price_date", desc=False).limit(1).execute()
     if not response.data:
         return None
-
     return datetime.strptime(
         response.data[0]["price_date"], "%Y-%m-%d"
     ).replace(tzinfo=timezone.utc)
-
 
 def fetchPriceData(
     ticker: str,
@@ -130,7 +123,7 @@ def fetchPriceData(
     """
     for attempt in range(retries):
         try:
-            stock = yf.Ticker(ticker)
+            stock = yf.Ticker(get_yfinance_symbol(ticker))
 
             effectiveStart = startDate or HISTORICAL_START_DATE
             if effectiveStart < HISTORICAL_START_DATE:
@@ -209,42 +202,40 @@ def uploadToSupabase(
     df: pd.DataFrame,
     batchSize: int = 500,
 ) -> int:
-    """Upload price data to Supabase, skipping duplicate rows."""
+    """Upload only rows that fall inside the ticker's S&P membership window."""
     ticker = normalize_ticker(ticker)
-    if is_excluded_ticker(ticker):
-        print(f"  {ticker}: refusing to upload excluded price history")
-        return 0
+    if ticker == SP500_BENCHMARK_TICKER:
+        # SPY is the market benchmark and trades independently of index membership.
+        eligible = df.copy()
+    else:
+        eligible = filter_sp500_price_rows(df, ticker)
 
-    df = validate_ohlcv_frame(df, ticker)
-    if df is None or df.empty:
+    eligible = validate_ohlcv_frame(eligible, ticker)
+    if eligible is None or eligible.empty:
         return 0
-
 
     records = []
     now = datetime.now(timezone.utc).isoformat()
-
-    for _, row in df.iterrows():
-        records.append(
-            {
-                "ticker": ticker.upper(),
-                "price_date": row["price_date"],
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "adj_close": (
-                    float(row["adj_close"])
-                    if pd.notna(row["adj_close"])
-                    else float(row["close"])
-                ),
-                "volume": int(row["volume"]),
-                "inserted_at": now,
-            }
-        )
+    for _, row in eligible.iterrows():
+        records.append({
+            "ticker": ticker,
+            "price_date": row["price_date"],
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "adj_close": (
+                float(row["adj_close"])
+                if pd.notna(row["adj_close"])
+                else float(row["close"])
+            ),
+            "volume": int(row["volume"]),
+            "inserted_at": now,
+        })
 
     inserted = 0
     for i in range(0, len(records), batchSize):
-        batch = records[i : i + batchSize]
+        batch = records[i:i + batchSize]
         try:
             client.table("stock_prices").insert(batch).execute()
             inserted += len(batch)
@@ -255,11 +246,10 @@ def uploadToSupabase(
                     client.table("stock_prices").insert(record).execute()
                     inserted += 1
                 except Exception:
-                    # Existing logical rows are skipped.
+                    # Existing logical rows are skipped; unique-key duplicates
+                    # are expected when overlapping backfill ranges are retried.
                     pass
-
     return inserted
-
 
 def processTicker(
     client: supabase.Client,
@@ -268,10 +258,10 @@ def processTicker(
     force: bool = False,
     max_days_stale: int = 3,
 ) -> dict[str, Any]:
-    """Backfill and update one ticker.
+    """Backfill each S&P membership interval without crossing index exits.
 
-    years_of_history=None loads all available history from 2000-01-01 onward.
-    A positive value requests a shorter range but never predates that cutoff.
+    Each re-entry is processed independently. This prevents provider rows and
+    stored observations outside the constituent windows from being ingested.
     """
     ticker = normalize_ticker(ticker)
     result = {
@@ -282,15 +272,24 @@ def processTicker(
         "error": None,
     }
 
-    if is_excluded_ticker(ticker):
-        print(f"  {ticker}: excluded due to known invalid price history")
+    if ticker == SP500_BENCHMARK_TICKER:
+        periods = (MembershipPeriod(
+            ticker=ticker,
+            start_date=SP500_HISTORY_START,
+            end_date_exclusive=None,
+        ),)
+    else:
+        periods = get_sp500_price_periods(ticker)
+
+    if not periods:
         result["skipped"] = 1
+        print(f"  {ticker}: not present in the S&P 500 membership file")
         return result
 
     try:
         today = datetime.now(timezone.utc)
-        staleDate = today - timedelta(days=max_days_stale)
-        requestedStart = (
+        stale_date = today - timedelta(days=max_days_stale)
+        requested_start = (
             HISTORICAL_START_DATE
             if years_of_history is None
             else max(
@@ -298,66 +297,122 @@ def processTicker(
                 today - timedelta(days=365 * years_of_history),
             )
         )
+        fetched_any = False
 
-        earliestDate = getEarliestPriceDate(client, ticker)
-        latestDate = getLatestPriceDate(client, ticker)
-
-        if latestDate is None:
-            startDate = requestedStart
-            label = f"since {startDate.date()}"
-            print(f"  {ticker}: No existing data, fetching {label} to {today.date()}")
-
-        else:
-            startDate = latestDate + timedelta(days=1)
-
-            # With maximum-history mode, backfill the missing prefix without
-            # deleting existing rows. With bounded mode, only backfill to the
-            # requested start when the DB starts too late.
-            if earliestDate is not None and earliestDate > requestedStart:
-                print(f"  {ticker}: Backfilling history before {earliestDate.date()}")
-                backfill = fetchPriceData(
-                    ticker,
-                    startDate=requestedStart,
-                    endDate=earliestDate,
+        for period in periods:
+            period_start = datetime.combine(
+                period.start_date, datetime.min.time(), tzinfo=timezone.utc
+            )
+            period_end = (
+                datetime.combine(
+                    period.end_date_exclusive,
+                    datetime.min.time(),
+                    tzinfo=timezone.utc,
                 )
-                if backfill is not None and not backfill.empty:
-                    result["fetched"] += len(backfill)
-                    result["inserted"] += uploadToSupabase(
-                        client, ticker, backfill
+                if period.end_date_exclusive is not None
+                else today + timedelta(days=1)
+            )
+            window_start = max(period_start, requested_start)
+            window_end = min(period_end, today + timedelta(days=1))
+
+            if window_start >= window_end:
+                continue
+
+            start_text = window_start.date().isoformat()
+            end_text = (
+                period.end_date_exclusive.isoformat()
+                if period.end_date_exclusive is not None
+                else (today.date() + timedelta(days=1)).isoformat()
+            )
+
+            earliest = getEarliestPriceDate(
+                client, ticker, start_text, end_text
+            )
+            latest = getLatestPriceDate(
+                client, ticker, start_text, end_text
+            )
+
+            # Missing interval: request the complete membership window.
+            if earliest is None or latest is None or force:
+                fetch_start = window_start
+                fetch_end = (
+                    min(
+                        datetime.combine(
+                            period.end_date_exclusive,
+                            datetime.min.time(),
+                            tzinfo=timezone.utc,
+                        ),
+                        today,
+                    )
+                    if period.end_date_exclusive is not None
+                    else today + timedelta(days=1)
+                )
+                label = "full membership window" if force or earliest is None else "refresh"
+                print(
+                    f"  {ticker}: fetching {label} "
+                    f"[{fetch_start.date()}, {end_text})"
+                )
+            else:
+                # Fill a missing prefix inside this same membership interval.
+                if earliest > window_start:
+                    backfill = fetchPriceData(
+                        ticker,
+                        startDate=window_start,
+                        endDate=earliest,
+                    )
+                    if backfill is not None and not backfill.empty:
+                        result["fetched"] += len(backfill)
+                        result["inserted"] += uploadToSupabase(
+                            client, ticker, backfill
+                        )
+                        fetched_any = True
+
+                # Closed membership intervals do not need daily refreshes.
+                # Try a final tail only when coverage ends materially early.
+                if period.end_date_exclusive is not None:
+                    if latest.date() >= (
+                        period.end_date_exclusive - timedelta(days=7)
+                    ):
+                        continue
+                    fetch_start = latest + timedelta(days=1)
+                    fetch_end = window_end
+                    print(
+                        f"  {ticker}: filling membership tail "
+                        f"from {fetch_start.date()} to {end_text}"
+                    )
+                else:
+                    if latest.date() >= stale_date.date():
+                        continue
+                    fetch_start = latest + timedelta(days=1)
+                    fetch_end = today + timedelta(days=1)
+                    print(
+                        f"  {ticker}: updating active membership from "
+                        f"{fetch_start.date()} to {today.date()}"
                     )
 
-            if force:
-                startDate = requestedStart
-            elif latestDate.date() >= staleDate.date():
-                print(f"  {ticker}: Up to date through {latestDate.date()}")
-                result["skipped"] = 1
-                return result
-            else:
-                print(
-                    f"  {ticker}: Updating recent data from "
-                    f"{startDate.date()} to {today.date()}"
-                )
+            if fetch_start >= fetch_end:
+                continue
 
-        if startDate is not None and startDate.date() >= today.date():
-            print(f"  {ticker}: Already up to date")
+            frame = fetchPriceData(
+                ticker,
+                startDate=fetch_start,
+                endDate=fetch_end,
+            )
+            if frame is None or frame.empty:
+                continue
+
+            result["fetched"] += len(frame)
+            result["inserted"] += uploadToSupabase(client, ticker, frame)
+            fetched_any = True
+
+        if not fetched_any and result["fetched"] == 0:
             result["skipped"] = 1
-            return result
-
-        df = fetchPriceData(
-            ticker,
-            startDate=startDate,
-            endDate=today,
-        )
-        if df is None or df.empty:
-            print(f"  {ticker}: No data fetched")
-            return result
-
-        result["fetched"] += len(df)
-        result["inserted"] += uploadToSupabase(client, ticker, df)
-        print(
-            f"  {ticker}: fetched={result['fetched']}, "
-            f"inserted={result['inserted']}"
-        )
+            print(f"  {ticker}: no missing S&P membership prices to load")
+        else:
+            print(
+                f"  {ticker}: fetched={result['fetched']}, "
+                f"inserted={result['inserted']}"
+            )
 
     except Exception as exc:
         result["error"] = str(exc)
@@ -365,9 +420,8 @@ def processTicker(
 
     return result
 
-
 def main() -> None:
-    """Load maximum available history for active and registered retired tickers."""
+    """Load all available S&P 500 membership history plus the SPY benchmark."""
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -391,7 +445,7 @@ def main() -> None:
 
     client = getSupabaseClient()
     tickers = getActiveTickers(client)
-    print(f"Found {len(tickers)} eligible tickers (active plus registered retired)\n")
+    print(f"Found {len(tickers)} eligible S&P 500 historical tickers plus SPY\n")
 
     totalInserted = 0
     totalFetched = 0

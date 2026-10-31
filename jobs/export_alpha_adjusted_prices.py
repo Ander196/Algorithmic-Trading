@@ -17,6 +17,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 
 from data.excluded_tickers import filter_excluded_ticker_rows, is_excluded_ticker
+from data.sp500_universe import filter_sp500_membership_rows
 from jobs.common import get_supabase_client
 
 load_dotenv(".env.secrets")
@@ -324,8 +325,13 @@ def export_prices(predictions_csv: Path, output_csv: Path, *, benchmark: str = "
             "Excluding retired/invalid tickers from price export: "
             + ", ".join(excluded_tickers)
         )
+    predictions = filter_sp500_membership_rows(
+        predictions, ticker_column="ticker", date_column="date"
+    )
     if predictions.empty:
-        raise ValueError("predictions contain no eligible tickers after exclusions")
+        raise ValueError(
+            "predictions contain no tickers inside their historical S&P 500 membership windows"
+        )
     if is_excluded_ticker(benchmark):
         raise ValueError(f"benchmark ticker {benchmark!r} is excluded")
     if predictions.duplicated(["date", "ticker"]).any():

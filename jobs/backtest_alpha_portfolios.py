@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from data.excluded_tickers import filter_excluded_ticker_rows
+from data.sp500_universe import filter_sp500_membership_rows
 from core.alpha_portfolio_backtest import (
     PortfolioBacktestConfig,
     run_alpha_portfolio_backtest,
@@ -43,7 +45,18 @@ def _load_predictions(path: Path) -> pd.DataFrame:
         raise ValueError(
             f"predictions CSV is missing required columns: {sorted(missing)}"
         )
-    rows["date"] = pd.to_datetime(rows["date"], errors="raise")
+    rows["date"] = pd.to_datetime(rows["date"], errors="raise").dt.normalize()
+    rows["ticker"] = rows["ticker"].astype(str).str.strip().str.upper()
+    rows, _excluded = filter_excluded_ticker_rows(
+        rows, include_historical_retired=True
+    )
+    rows = filter_sp500_membership_rows(
+        rows, ticker_column="ticker", date_column="date"
+    )
+    if rows.empty:
+        raise ValueError(
+            "predictions contain no tickers inside their historical S&P 500 membership windows"
+        )
     return rows.set_index(["date", "ticker"]).sort_index()
 
 

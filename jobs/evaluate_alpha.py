@@ -30,7 +30,12 @@ from jobs.export_alpha_adjusted_prices import (
 )
 from dotenv import load_dotenv
 
-from data.excluded_tickers import is_excluded_from_alpha_history, normalize_ticker
+from data.excluded_tickers import normalize_ticker
+from data.sp500_universe import (
+    filter_sp500_price_rows,
+    get_sp500_price_periods,
+    get_sp500_tickers,
+)
 
 load_dotenv(".env.secrets")
 
@@ -167,23 +172,15 @@ def get_alpha_universe(
     client: Client,
     market_ticker: str,
 ) -> list[str]:
-    """Return historical research candidates, independent of current activity.
+    """Return only symbols with S&P 500 point-in-time membership since 2000.
 
-    Every stock-price row references stocks.ticker (storage/schema.sql), so
-    reading the full catalog discovers symbols whether active or retired.
-    load_alpha_inputs subsequently keeps only symbols with usable stored prices.
-    Their actual date coverage is derived from those full histories, not from
-    the current stocks.is_active flag.
+    The checked-in membership file, not the current active flag or the full
+    stocks table, defines the historical research universe. This intentionally
+    excludes European equities and other instruments outside the index history.
     """
-    response = client.table("stocks").select("ticker").execute()
-    tickers = {
-        normalize_ticker(row["ticker"])
-        for row in (response.data or [])
-        if row.get("ticker") and not is_excluded_from_alpha_history(row["ticker"])
-    }
+    tickers = set(get_sp500_tickers())
     tickers.discard(market_ticker.upper())
     return sorted(tickers)
-
 
 def load_alpha_inputs(
     client: Client,
@@ -191,7 +188,7 @@ def load_alpha_inputs(
     market_ticker: str,
     history_limit: int | None = None,
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame, AlphaLoadSummary]:
-    """Load market and stock histories needed by the Alpha dataset builder."""
+    """Load and membership-filter market and constituent OHLCV histories."""
     if history_limit is not None and history_limit <= 0:
         raise ValueError("history_limit must be greater than zero")
 
@@ -205,15 +202,25 @@ def load_alpha_inputs(
 
     for ticker in tickers:
         try:
-            stock_data[ticker] = _to_ohlcv_frame(
-                fetch_price_history(
-                    client,
-                    ticker,
-                    limit=history_limit,
-                    include_adj_close=True,
-                    allow_historical_retired=True,
-                )
+            raw = fetch_price_history(
+                client,
+                ticker,
+                limit=history_limit,
+                include_adj_close=True,
+                allow_historical_retired=True,
             )
+            history = _to_ohlcv_frame(raw)
+            membership_frame = history.rename_axis("price_date").reset_index()
+            membership_frame = filter_sp500_price_rows(
+                membership_frame, ticker, date_column="price_date"
+            )
+            if membership_frame.empty:
+                failed.append(ticker)
+                print(f"WARNING: skipping {ticker}: no stored prices inside S&P membership")
+                continue
+            stock_data[ticker] = membership_frame.set_index("price_date")[
+                ["open", "high", "low", "close", "volume"]
+            ].sort_index()
         except Exception as exc:
             failed.append(ticker)
             print(f"WARNING: skipping {ticker}: {exc}")
@@ -239,6 +246,50 @@ def load_alpha_inputs(
         ),
     )
 
+
+def build_sp500_alpha_dataset(
+    stock_data: dict[str, pd.DataFrame],
+    market_data: pd.DataFrame,
+    config: AlphaDatasetConfig | None = None,
+) -> pd.DataFrame:
+    """Build Alpha rows separately for every uninterrupted membership period.
+
+    Building each period independently resets rolling features and forward
+    labels at every index exit/re-entry, so no feature or label crosses a gap
+    during which the stock was not an S&P 500 constituent.
+    """
+    dataset_config = config or AlphaDatasetConfig(horizon_days=5, market_ticker="SPY")
+    builder = AlphaDatasetBuilder(dataset_config)
+    frames: list[pd.DataFrame] = []
+
+    for ticker, history in stock_data.items():
+        for period in get_sp500_price_periods(ticker):
+            start = pd.Timestamp(period.start_date)
+            segment = history.loc[history.index >= start]
+            if period.end_date_exclusive is not None:
+                end = pd.Timestamp(period.end_date_exclusive)
+                segment = segment.loc[segment.index < end]
+
+            if len(segment) < dataset_config.min_history + dataset_config.horizon_days:
+                continue
+            try:
+                interval_dataset = builder.build({ticker: segment}, market_data)
+            except ValueError as exc:
+                if "No valid Alpha dataset rows" in str(exc):
+                    continue
+                raise
+            if not interval_dataset.empty:
+                frames.append(interval_dataset)
+
+    if not frames:
+        raise ValueError(
+            "No valid Alpha dataset rows were produced inside S&P 500 membership intervals"
+        )
+
+    result = pd.concat(frames, axis=0).sort_index()
+    if result.index.has_duplicates:
+        raise ValueError("Duplicate Alpha rows detected across membership intervals")
+    return result
 
 def _filter_dataset_by_evaluation_end_date(
     dataset: pd.DataFrame,
@@ -288,9 +339,10 @@ def evaluate_alpha(
     # Predict and train on total-return-adjusted OHLC in one USD base currency.
     # This is necessary for excess-return labels to be comparable with SPY.
     stock_data = _convert_stock_histories_to_usd(stock_data, market_data)
-    dataset = AlphaDatasetBuilder(dataset_config).build(
+    dataset = build_sp500_alpha_dataset(
         stock_data,
         market_data,
+        config=dataset_config,
     )
     dataset = _filter_dataset_by_evaluation_end_date(dataset, evaluation_end_date)
 

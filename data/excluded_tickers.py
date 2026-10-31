@@ -1,7 +1,7 @@
 """Tickers deliberately removed from ingestion and research workflows.
 
-Entries include known invalid price histories and symbols explicitly retired
-from this research universe. Keep this list aligned with the Supabase cleanup.
+Entries identify regional tickers intentionally outside the current S&P 500-only
+research scope. Historical S&P 500 tickers must not be placed on this list.
 """
 
 EXCLUDED_TICKERS = frozenset(
@@ -24,16 +24,11 @@ EXCLUDED_TICKERS = frozenset(
         "SHEL.L",
         "ULVR.L",
         "VOD.L",
-        # Explicitly retired: no usable stored history; do not re-add it.
-        "WBD",
-        # Retired after merger; exclude from live data, but keep its stored
-        # history eligible for historical point-in-time Alpha research.
-        "QRVO",
     }
 )
 
 
-HISTORICAL_ALPHA_INCLUDED_TICKERS = frozenset({"QRVO"})
+HISTORICAL_ALPHA_INCLUDED_TICKERS = frozenset()
 
 
 def normalize_ticker(ticker: object) -> str:
@@ -49,8 +44,7 @@ def is_excluded_ticker(ticker: object) -> bool:
 def is_excluded_from_alpha_history(ticker: object) -> bool:
     """Return whether a ticker must be omitted from historical Alpha research.
 
-    A retired symbol with preserved, usable prices can remain eligible in its
-    historical period even though it is excluded from the live universe.
+    European symbols remain excluded from this S&P 500-focused research universe.
     """
     normalized = normalize_ticker(ticker)
     return (
@@ -67,9 +61,8 @@ def filter_excluded_ticker_rows(
 ):
     """Return normalized rows without excluded tickers.
 
-    By default, applies the full operational blocklist. Historical research
-    callers may opt into symbols whose preserved history remains usable, such
-    as QRVO, while still excluding symbols with known invalid price histories.
+    Applies the regional-symbol blocklist. The point-in-time S&P 500 list is
+    independently enforced by the membership helpers.
     """
     if ticker_column not in rows.columns:
         raise ValueError(f"missing ticker column: {ticker_column}")

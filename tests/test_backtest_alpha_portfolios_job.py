@@ -12,14 +12,14 @@ def test_load_predictions_csv_builds_named_multiindex(tmp_path) -> None:
     path = tmp_path / "predictions.csv"
     pd.DataFrame({
         "date": ["2024-01-02", "2024-01-02"],
-        "ticker": ["AAA", "BBB"],
+        "ticker": ["AAPL", "MSFT"],
         "expected_excess_return": [0.01, -0.02],
     }).to_csv(path, index=False)
 
     result = _load_predictions(path)
 
     assert list(result.index.names) == ["date", "ticker"]
-    assert result.loc[(pd.Timestamp("2024-01-02"), "AAA"), "expected_excess_return"] == pytest.approx(0.01)
+    assert result.loc[(pd.Timestamp("2024-01-02"), "AAPL"), "expected_excess_return"] == pytest.approx(0.01)
 
 
 def test_load_adjusted_price_panel_pivots_long_format(tmp_path) -> None:
