@@ -31,14 +31,19 @@ EXCLUDED_TICKERS = frozenset(
 
 
 # Historical series whose ticker identity/price quality is unreliable for
-# Alpha research. CPWR was reused: historical S&P 500 Compuware ceased trading
-# in 2014, and a different issuer adopted CPWR in 2017. The audited 2006-2011
-# series also contains extreme jumps and long zero-volume runs, identically
-# reproduced by Yahoo; source agreement does not certify that history. PARA
-# has inconsistent price scales and volumes in the stored history.
+# Alpha research:
+# - CPWR was reused: historical S&P 500 Compuware ceased trading in 2014, and a
+#   different issuer adopted CPWR in 2017. Its audited 2006-2011 history also
+#   contains extreme observation-to-observation jumps and long zero-volume runs
+#   reproduced by Yahoo; source agreement does not certify correctness.
+# - PARA has inconsistent price scales and volume observations in stored data.
+# - EP and GR have extensive zero-volume sessions reported by both Supabase and
+#   Yahoo, plus numerous >50% observation-to-observation adjusted-price moves.
+#   Their provider agreement is not independent validation of the historical
+#   OHLCV series; keep them out pending independent reconstruction.
 # Keep this separate from the operational blocklist: it must not affect
 # ingestion, daily allocation, or any live trading path.
-ALPHA_DATA_QUALITY_EXCLUDED_TICKERS = frozenset({"PARA", "CPWR"})
+ALPHA_DATA_QUALITY_EXCLUDED_TICKERS = frozenset({"CPWR", "EP", "GR", "PARA"})
 
 
 HISTORICAL_ALPHA_INCLUDED_TICKERS = frozenset()
