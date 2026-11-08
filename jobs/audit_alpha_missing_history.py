@@ -1,20 +1,23 @@
 """Read-only Yahoo coverage probe for historical S&P 500 tickers missing in Supabase.
 
-This audit accepts the failed-ticker CSV emitted from an Alpha evaluation log.
-It queries Yahoo only inside the ticker's recorded S&P 500 membership windows,
-and optionally tests a dot-to-hyphen share-class spelling. It never writes to
-Supabase, emits repair SQL, or treats provider availability as identity proof.
+The job first validates Yahoo access with a liquid, known control ticker. It
+then queries missing historical symbols only inside their recorded S&P 500
+membership windows, optionally testing dot-to-hyphen share-class spellings.
+It never writes to Supabase, emits repair SQL, or treats provider availability
+as proof of issuer/security identity.
 """
 from __future__ import annotations
 
 import argparse
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
+from yfinance.exceptions import YFPricesMissingError
 
 from data.retired_tickers import RETIRED_TICKERS
 from data.sp500_universe import (
@@ -24,7 +27,9 @@ from data.sp500_universe import (
 )
 
 
-HISTORY_COLUMNS = {"Close", "Adj Close"}
+DEFAULT_CONTROL_TICKER = "AAPL"
+DEFAULT_CONTROL_START = "2026-10-01"
+DEFAULT_CONTROL_END = "2026-10-30"
 AUDIT_COLUMNS = (
     "ticker",
     "membership_period_count",
@@ -37,6 +42,7 @@ AUDIT_COLUMNS = (
     "primary_first_date",
     "primary_last_date",
     "primary_requests",
+    "primary_empty_responses",
     "primary_errors",
     "primary_dividend_events",
     "primary_split_events",
@@ -45,11 +51,22 @@ AUDIT_COLUMNS = (
     "alias_first_date",
     "alias_last_date",
     "alias_requests",
+    "alias_empty_responses",
     "alias_errors",
     "alias_dividend_events",
     "alias_split_events",
     "status",
     "identity_warning",
+)
+CONTROL_COLUMNS = (
+    "control_ticker",
+    "start_date",
+    "end_date_exclusive",
+    "sessions",
+    "first_date",
+    "last_date",
+    "yfinance_version",
+    "status",
 )
 
 
@@ -62,12 +79,26 @@ class YahooProbe:
     first_date: str | None
     last_date: str | None
     requests: int
+    empty_responses: int
     errors: int
     dividend_events: int
     split_events: int
 
 
-def _summarize_yahoo_history(history: pd.DataFrame) -> tuple[int, str | None, str | None, int, int]:
+def _fetch_yahoo_history(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """Fetch Yahoo history while surfacing errors otherwise hidden as empty frames."""
+    return yf.Ticker(symbol).history(
+        start=start,
+        end=end,
+        auto_adjust=False,
+        actions=True,
+        raise_errors=True,
+    )
+
+
+def _summarize_yahoo_history(
+    history: pd.DataFrame,
+) -> tuple[int, str | None, str | None, int, int]:
     """Count valid price observations and corporate-action rows, without prices."""
     if history is None or history.empty:
         return 0, None, None, 0, 0
@@ -87,8 +118,9 @@ def _summarize_yahoo_history(history: pd.DataFrame) -> tuple[int, str | None, st
             f"Yahoo history has neither 'Adj Close' nor 'Close': {list(frame.columns)}"
         )
     prices = pd.to_numeric(frame[price_column], errors="coerce")
-    valid = prices.notna() & (prices > 0) & prices.map(lambda value: pd.notna(value) and value != float("inf"))
-    valid_dates = frame.index[valid.to_numpy()]
+    price_values = prices.to_numpy(dtype=float)
+    valid = np.isfinite(price_values) & (price_values > 0)
+    valid_dates = frame.index[valid]
     dividends = (
         pd.to_numeric(frame["Dividends"], errors="coerce").fillna(0.0)
         if "Dividends" in frame.columns else pd.Series(0.0, index=frame.index)
@@ -110,6 +142,52 @@ def _summarize_yahoo_history(history: pd.DataFrame) -> tuple[int, str | None, st
     )
 
 
+def _fetch_with_retries(
+    symbol: str,
+    start: str,
+    end: str,
+    *,
+    history_fetcher: Callable[[str, str, str], pd.DataFrame],
+    retries: int,
+    delay_seconds: float,
+    sleeper: Callable[[float], None],
+) -> tuple[pd.DataFrame, int, int, int]:
+    """Return history, request attempts, empty/no-data responses and other errors."""
+    history = pd.DataFrame()
+    requests = 0
+    empty_responses = 0
+    errors = 0
+
+    for attempt in range(retries):
+        requests += 1
+        try:
+            history = history_fetcher(symbol, start, end)
+        except YFPricesMissingError:
+            # Yahoo explicitly reports no prices for this symbol/range. Retry
+            # once more before accepting the no-data response as stable.
+            empty_responses += 1
+            if attempt + 1 < retries:
+                sleeper(delay_seconds * (attempt + 1))
+                continue
+            break
+        except Exception:
+            errors += 1
+            if attempt + 1 < retries:
+                sleeper(delay_seconds * (attempt + 1))
+                continue
+            break
+
+        if history is None or history.empty:
+            # Some yfinance paths still return an empty frame rather than raise.
+            empty_responses += 1
+            if attempt + 1 < retries:
+                sleeper(delay_seconds * (attempt + 1))
+                continue
+        break
+
+    return history, requests, empty_responses, errors
+
+
 def _probe_yahoo_symbol(
     symbol: str,
     windows,
@@ -123,6 +201,7 @@ def _probe_yahoo_symbol(
     dates: list[pd.Timestamp] = []
     errors = 0
     requests = 0
+    empty_responses = 0
     dividend_events = 0
     split_events = 0
 
@@ -134,16 +213,18 @@ def _probe_yahoo_symbol(
             )
         end = window.end_date_exclusive.isoformat()
 
-        history = pd.DataFrame()
-        for attempt in range(retries):
-            try:
-                history = history_fetcher(symbol, start, end)
-                requests += 1
-                break
-            except Exception:
-                errors += 1
-                if attempt + 1 < retries:
-                    sleeper(delay_seconds * (attempt + 1))
+        history, attempts, empty_count, error_count = _fetch_with_retries(
+            symbol,
+            start,
+            end,
+            history_fetcher=history_fetcher,
+            retries=retries,
+            delay_seconds=delay_seconds,
+            sleeper=sleeper,
+        )
+        requests += attempts
+        empty_responses += empty_count
+        errors += error_count
 
         count, first_date, last_date, dividends, splits = _summarize_yahoo_history(history)
         sessions += count
@@ -163,10 +244,46 @@ def _probe_yahoo_symbol(
         first_date=min(dates).date().isoformat() if dates else None,
         last_date=max(dates).date().isoformat() if dates else None,
         requests=requests,
+        empty_responses=empty_responses,
         errors=errors,
         dividend_events=dividend_events,
         split_events=split_events,
     )
+
+
+def _validate_control_ticker(
+    history_fetcher: Callable[[str, str, str], pd.DataFrame],
+    control_ticker: str,
+    start: str,
+    end: str,
+) -> dict[str, object]:
+    """Fail closed unless Yahoo returns real observations for a liquid control."""
+    try:
+        history = history_fetcher(control_ticker, start, end)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Yahoo control check failed for {control_ticker} ({start}..{end}): {exc}. "
+            "No missing-ticker results were classified; retry when Yahoo is available."
+        ) from exc
+
+    sessions, first_date, last_date, _, _ = _summarize_yahoo_history(history)
+    if sessions <= 0:
+        raise RuntimeError(
+            f"Yahoo control check returned no valid observations for {control_ticker} "
+            f"({start}..{end}). No missing-ticker results were classified; "
+            "check Yahoo access and retry."
+        )
+
+    return {
+        "control_ticker": control_ticker,
+        "start_date": start,
+        "end_date_exclusive": end,
+        "sessions": sessions,
+        "first_date": first_date,
+        "last_date": last_date,
+        "yfinance_version": getattr(yf, "__version__", "unknown"),
+        "status": "passed",
+    }
 
 
 def _ticker_shape_review(ticker: str) -> str:
@@ -213,6 +330,7 @@ def audit_missing_ticker(
             "primary_first_date": None,
             "primary_last_date": None,
             "primary_requests": 0,
+            "primary_empty_responses": 0,
             "primary_errors": 0,
             "primary_dividend_events": 0,
             "primary_split_events": 0,
@@ -221,6 +339,7 @@ def audit_missing_ticker(
             "alias_first_date": None,
             "alias_last_date": None,
             "alias_requests": 0,
+            "alias_empty_responses": 0,
             "alias_errors": 0,
             "alias_dividend_events": 0,
             "alias_split_events": 0,
@@ -233,14 +352,7 @@ def audit_missing_ticker(
             f"{normalized}: open-ended membership interval; audit window needs an explicit end"
         )
 
-    fetcher = history_fetcher or (
-        lambda symbol, start, end: yf.Ticker(symbol).history(
-            start=start,
-            end=end,
-            auto_adjust=False,
-            actions=True,
-        )
-    )
+    fetcher = history_fetcher or _fetch_yahoo_history
     primary_symbol = get_yfinance_symbol(normalized)
     primary = _probe_yahoo_symbol(
         primary_symbol,
@@ -265,14 +377,15 @@ def audit_missing_ticker(
             delay_seconds=delay_seconds,
             sleeper=sleeper,
         )
-        if alias_symbol and primary.sessions == 0
+        if alias_symbol and primary.sessions == 0 and primary.errors == 0
         else None
     )
 
     if primary.sessions:
         status = (
-            "primary_history_available_with_provider_errors"
-            if primary.errors else "primary_history_available_identity_review"
+            "primary_history_available_with_provider_issues"
+            if primary.errors or primary.empty_responses
+            else "primary_history_available_identity_review"
         )
         identity_warning = (
             "Yahoo has observations inside the historical membership windows. "
@@ -281,24 +394,23 @@ def audit_missing_ticker(
         )
     elif alias and alias.sessions:
         status = (
-            "share_class_alias_available_with_provider_errors"
-            if alias.errors else "possible_share_class_alias_identity_review"
+            "share_class_alias_available_with_provider_issues"
+            if alias.errors or alias.empty_responses
+            else "possible_share_class_alias_identity_review"
         )
         identity_warning = (
             "A dot-to-hyphen Yahoo spelling returned observations. This is only a "
             "candidate mapping; independently confirm the exact share class and issuer."
         )
-    elif primary.requests == 0 and primary.errors:
-        status = "primary_provider_error"
-        identity_warning = "Yahoo requests failed; no conclusion about data availability is possible."
-    elif primary.errors and (alias is None or alias.errors):
+    elif primary.errors or (alias and alias.errors):
         status = "provider_errors_no_conclusion"
         identity_warning = "One or more Yahoo requests failed; retry before classifying this symbol."
     else:
         status = "no_history_for_tested_yahoo_symbols"
         identity_warning = (
-            "No Yahoo observations were returned for the tested original/share-class "
-            "symbols in the membership windows. This does not prove the security never traded."
+            "Yahoo returned no prices for the tested original/share-class symbols "
+            "in the membership windows after retrying. This is not proof that the "
+            "security never traded or that no other archive contains its history."
         )
 
     last_membership_end = membership[-1].end_date_exclusive
@@ -322,6 +434,7 @@ def audit_missing_ticker(
         "primary_first_date": primary.first_date,
         "primary_last_date": primary.last_date,
         "primary_requests": primary.requests,
+        "primary_empty_responses": primary.empty_responses,
         "primary_errors": primary.errors,
         "primary_dividend_events": primary.dividend_events,
         "primary_split_events": primary.split_events,
@@ -330,6 +443,7 @@ def audit_missing_ticker(
         "alias_first_date": alias.first_date if alias else None,
         "alias_last_date": alias.last_date if alias else None,
         "alias_requests": alias.requests if alias else 0,
+        "alias_empty_responses": alias.empty_responses if alias else 0,
         "alias_errors": alias.errors if alias else 0,
         "alias_dividend_events": alias.dividend_events if alias else 0,
         "alias_split_events": alias.split_events if alias else 0,
@@ -345,8 +459,12 @@ def audit_missing_history(
     retries: int = 2,
     delay_seconds: float = 0.15,
     max_tickers: int | None = None,
+    control_ticker: str = DEFAULT_CONTROL_TICKER,
+    control_start: str = DEFAULT_CONTROL_START,
+    control_end: str = DEFAULT_CONTROL_END,
+    history_fetcher: Callable[[str, str, str], pd.DataFrame] | None = None,
 ) -> dict[str, int]:
-    """Probe the missing-ticker list and write read-only audit CSVs."""
+    """Validate Yahoo with a liquid control, then audit missing tickers."""
     source = pd.read_csv(tickers_csv)
     if "ticker" not in source.columns:
         raise ValueError("tickers CSV must contain a 'ticker' column")
@@ -361,11 +479,29 @@ def audit_missing_history(
         if max_tickers <= 0:
             raise ValueError("max_tickers must be > 0")
         tickers = tickers[:max_tickers]
+    if not control_ticker.strip():
+        raise ValueError("control_ticker must not be empty")
+    if pd.Timestamp(control_end) <= pd.Timestamp(control_start):
+        raise ValueError("control_end must be later than control_start")
+
+    fetcher = history_fetcher or _fetch_yahoo_history
+    control = _validate_control_ticker(
+        fetcher,
+        control_ticker.strip().upper(),
+        control_start,
+        control_end,
+    )
+    print(
+        f"Yahoo control passed: {control['control_ticker']} "
+        f"{control['first_date']}..{control['last_date']} "
+        f"({control['sessions']} sessions; yfinance {control['yfinance_version']})"
+    )
 
     rows: list[dict[str, object]] = []
     for position, ticker in enumerate(tickers, start=1):
         result = audit_missing_ticker(
             ticker,
+            history_fetcher=fetcher,
             retries=retries,
             delay_seconds=delay_seconds,
         )
@@ -386,6 +522,9 @@ def audit_missing_history(
         .sort_values(["tickers", "status"], ascending=[False, True])
     )
     summary.to_csv(output_dir / "alpha_missing_history_summary.csv", index=False)
+    pd.DataFrame([control], columns=CONTROL_COLUMNS).to_csv(
+        output_dir / "alpha_missing_history_control.csv", index=False
+    )
 
     counts = {
         "tickers_checked": int(len(audit)),
@@ -395,10 +534,9 @@ def audit_missing_history(
             audit["status"].eq("no_history_for_tested_yahoo_symbols").sum()
         ),
         "provider_errors": int(
-            audit["status"].isin(
-                ["primary_provider_error", "provider_errors_no_conclusion"]
-            ).sum()
+            audit["status"].eq("provider_errors_no_conclusion").sum()
         ),
+        "control_sessions": int(control["sessions"]),
     }
     print("\n=== Alpha missing-history Yahoo probe ===")
     for key, value in counts.items():
@@ -427,6 +565,9 @@ def main() -> None:
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--delay-seconds", type=float, default=0.15)
     parser.add_argument("--max-tickers", type=int, default=None)
+    parser.add_argument("--control-ticker", default=DEFAULT_CONTROL_TICKER)
+    parser.add_argument("--control-start", default=DEFAULT_CONTROL_START)
+    parser.add_argument("--control-end", default=DEFAULT_CONTROL_END)
     args = parser.parse_args()
     try:
         audit_missing_history(
@@ -435,8 +576,11 @@ def main() -> None:
             retries=args.retries,
             delay_seconds=args.delay_seconds,
             max_tickers=args.max_tickers,
+            control_ticker=args.control_ticker,
+            control_start=args.control_start,
+            control_end=args.control_end,
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
 
 
