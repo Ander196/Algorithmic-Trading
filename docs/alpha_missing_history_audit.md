@@ -44,13 +44,11 @@ aborts before classifying any missing ticker. A control result is saved to
 observed date range.
 
 The Yahoo request uses `raise_errors=True` so yfinance exceptions are surfaced
-instead of silently converted into empty DataFrames. The argument is deprecated
-in newer yfinance releases in favor of changing the library's global debug
-configuration, but remains supported by the versions allowed in this project.
-Yahoo "no price data" exceptions and ordinary empty frames are counted as
-empty/no-data responses and retried. Network, rate-limit, and other exceptions
-are counted separately as provider errors. Provider errors must not be
-interpreted as missing security history.
+instead of silently converted into empty DataFrames. Yahoo "no price data"
+exceptions and ordinary empty frames are counted as empty/no-data responses and
+retried. Network, rate-limit, and other exceptions are counted separately as
+provider errors. Provider errors must not be interpreted as missing security
+history.
 
 ### Historical windows
 
