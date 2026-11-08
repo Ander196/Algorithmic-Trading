@@ -25,6 +25,14 @@ read-only investigation workflow.
   trade under CPWR on 2017-06-21. Provider history keyed only by ticker can
   therefore join records from different issuers unless security identity and
   effective dates are handled explicitly.
+- An independent identity cross-check also conflicts with the stored series:
+  the CPWR comparison starts at an adjusted close of about 29.99 on 2006-12-04
+  and ends around 0.346 on 2011-12-30, while Compuware's FY2011 Form 10-K
+  reported a total-return index rising from 100 at FY2006 to 147.51 at FY2011.
+  The SEC metric includes reinvested dividends and is not a direct daily-close
+  series, but its direction is materially inconsistent with the vendor
+  adjusted-price path. See
+  https://www.sec.gov/Archives/edgar/data/859014/000114036111030346/form10k.htm.
 - This quarantine is separate from `EXCLUDED_TICKERS`; it does not change
   operational ingestion, daily allocation, Layer 1/Layer 2, or any live path.
 - PARA and CPWR remain in Supabase. This change does not delete, overwrite, or
