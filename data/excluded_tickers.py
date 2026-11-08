@@ -28,6 +28,12 @@ EXCLUDED_TICKERS = frozenset(
 )
 
 
+# Historical price series confirmed to be unreliable for Alpha research.
+# Keep this separate from the operational blocklist: it must not affect
+# ingestion, daily allocation, or any live trading path.
+ALPHA_DATA_QUALITY_EXCLUDED_TICKERS = frozenset({"PARA"})
+
+
 HISTORICAL_ALPHA_INCLUDED_TICKERS = frozenset()
 
 
@@ -47,8 +53,9 @@ def is_excluded_from_alpha_history(ticker: object) -> bool:
     European symbols remain excluded from this S&P 500-focused research universe.
     """
     normalized = normalize_ticker(ticker)
+    alpha_exclusions = EXCLUDED_TICKERS | ALPHA_DATA_QUALITY_EXCLUDED_TICKERS
     return (
-        normalized in EXCLUDED_TICKERS
+        normalized in alpha_exclusions
         and normalized not in HISTORICAL_ALPHA_INCLUDED_TICKERS
     )
 
@@ -58,6 +65,7 @@ def filter_excluded_ticker_rows(
     ticker_column: str = "ticker",
     *,
     include_historical_retired: bool = False,
+    include_alpha_quality_exclusions: bool = False,
 ):
     """Return normalized rows without excluded tickers.
 
@@ -73,6 +81,8 @@ def filter_excluded_ticker_rows(
         if include_historical_retired
         else EXCLUDED_TICKERS
     )
+    if include_alpha_quality_exclusions:
+        excluded_symbols = excluded_symbols | ALPHA_DATA_QUALITY_EXCLUDED_TICKERS
     excluded_mask = normalized.isin(excluded_symbols)
     excluded = tuple(sorted(normalized.loc[excluded_mask].dropna().unique().tolist()))
     filtered[ticker_column] = normalized
