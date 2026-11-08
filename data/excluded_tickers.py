@@ -30,10 +30,13 @@ EXCLUDED_TICKERS = frozenset(
 )
 
 
-# Historical price series confirmed to be unreliable for Alpha research.
+# Historical series whose ticker identity/price quality is unreliable for
+# Alpha research. CPWR is a reused symbol: historical S&P 500 Compuware ended
+# trading in 2014, while a different issuer adopted CPWR in 2017. PARA has
+# inconsistent scales and volumes in the stored history.
 # Keep this separate from the operational blocklist: it must not affect
 # ingestion, daily allocation, or any live trading path.
-ALPHA_DATA_QUALITY_EXCLUDED_TICKERS = frozenset({"PARA"})
+ALPHA_DATA_QUALITY_EXCLUDED_TICKERS = frozenset({"PARA", "CPWR"})
 
 
 HISTORICAL_ALPHA_INCLUDED_TICKERS = frozenset()
