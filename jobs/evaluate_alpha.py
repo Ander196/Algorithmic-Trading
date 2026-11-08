@@ -30,7 +30,10 @@ from jobs.export_alpha_adjusted_prices import (
 )
 from dotenv import load_dotenv
 
-from data.excluded_tickers import normalize_ticker
+from data.excluded_tickers import (
+    ALPHA_DATA_QUALITY_EXCLUDED_TICKERS,
+    normalize_ticker,
+)
 from data.sp500_universe import (
     filter_sp500_price_rows,
     get_sp500_price_periods,
@@ -180,6 +183,7 @@ def get_alpha_universe(
     """
     tickers = set(get_sp500_tickers())
     tickers.discard(market_ticker.upper())
+    tickers.difference_update(ALPHA_DATA_QUALITY_EXCLUDED_TICKERS)
     return sorted(tickers)
 
 def load_alpha_inputs(
