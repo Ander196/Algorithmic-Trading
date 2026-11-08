@@ -1,7 +1,9 @@
-"""Tickers deliberately removed from ingestion and research workflows.
+"""Operational ticker exclusions and Alpha-only data-quality quarantine.
 
-Entries identify regional tickers intentionally outside the current S&P 500-only
-research scope. Historical S&P 500 tickers must not be placed on this list.
+EXCLUDED_TICKERS controls operational ingestion/selection. Alpha research has a
+separate quarantine for historical price series confirmed to be unreliable.
+Historical S&P 500 symbols must not be added to the operational blocklist just
+because their preserved research history needs investigation.
 """
 
 EXCLUDED_TICKERS = frozenset(
@@ -50,7 +52,8 @@ def is_excluded_ticker(ticker: object) -> bool:
 def is_excluded_from_alpha_history(ticker: object) -> bool:
     """Return whether a ticker must be omitted from historical Alpha research.
 
-    European symbols remain excluded from this S&P 500-focused research universe.
+    European symbols outside the research scope and Alpha-only data-quality
+    quarantines are excluded. This does not change the operational blocklist.
     """
     normalized = normalize_ticker(ticker)
     alpha_exclusions = EXCLUDED_TICKERS | ALPHA_DATA_QUALITY_EXCLUDED_TICKERS
@@ -69,8 +72,9 @@ def filter_excluded_ticker_rows(
 ):
     """Return normalized rows without excluded tickers.
 
-    Applies the regional-symbol blocklist. The point-in-time S&P 500 list is
-    independently enforced by the membership helpers.
+    Applies the operational blocklist. Set include_alpha_quality_exclusions
+    when preparing Alpha research inputs or downstream Alpha artifacts. The
+    point-in-time S&P 500 list is independently enforced by membership helpers.
     """
     if ticker_column not in rows.columns:
         raise ValueError(f"missing ticker column: {ticker_column}")
