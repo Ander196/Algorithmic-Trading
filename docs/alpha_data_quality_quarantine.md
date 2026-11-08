@@ -33,11 +33,36 @@ read-only investigation workflow.
   series, but its direction is materially inconsistent with the vendor
   adjusted-price path. See
   https://www.sec.gov/Archives/edgar/data/859014/000114036111030346/form10k.htm.
+- **EP (El Paso Corporation)** is excluded pending independent reconstruction
+  of its historical OHLCV series. The read-only audit covered 3,119 overlapping
+  Supabase/Yahoo observations from 2000-01-03 through 2012-05-24. Their
+  adjusted-close scale factor was 1.0 (95th-percentile relative dispersion
+  approximately 0.000004%), but both sources reported zero volume on 1,250
+  sessions (about 40.1%). The audit also flagged 31 observation-to-observation
+  adjusted-price moves greater than 50% (29 flagged by both sources and 2 by
+  the stored series alone). Provider agreement does not independently validate
+  these unusually sparse-volume and discontinuous observations.
+- **GR (Goodrich Corporation)** is excluded for the same conservative
+  data-quality reason. The audit covered 2,870 overlapping Supabase/Yahoo
+  observations from 2001-01-02 through 2012-07-26. Their adjusted-close scale
+  factor was 1.0 (95th-percentile relative dispersion approximately
+  0.000004%), but both sources reported zero volume on 1,021 sessions (about
+  35.6%). Fourteen observation-to-observation adjusted-price moves exceeded
+  the 50% review threshold (11 flagged by both sources, 2 by Yahoo alone, and
+  1 by the stored series alone). The maximum absolute observation-to-
+  observation return was approximately 118.2% in both sources. These flags
+  require issuer/exchange-level verification; they are not individually proof
+  that each move is erroneous.
+- The EP and GR audit compares adjusted OHLCV, not raw exchange closes. The
+  quarantine is therefore not based on a direct comparison between adjusted
+  closes and unadjusted figures quoted in issuer filings. Re-admission requires
+  an independent reconstruction of price basis, trading volume, corporate
+  actions, and issuer identity across the complete history.
 - This quarantine is separate from `EXCLUDED_TICKERS`; it does not change
   operational ingestion, daily allocation, Layer 1/Layer 2, or any live path.
-- PARA and CPWR remain in Supabase. This change does not delete, overwrite, or
-  repair any stored rows.
-- Re-admit either symbol only after its complete historical identity, OHLCV,
+- PARA, CPWR, EP, and GR remain in Supabase. This change does not delete,
+  overwrite, or repair any stored rows.
+- Re-admit a symbol only after its complete historical identity, OHLCV,
   corporate actions, and price basis have been independently validated.
 
 References:
@@ -46,6 +71,12 @@ References:
 - Ocean Thermal Energy Corp. filing describing its change from TDYS to CPWR
   and first trading date:
   https://www.sec.gov/Archives/edgar/data/827099/000165495419000299/cpwr_posam.htm
+- El Paso Corporation historical common-stock filing:
+  https://www.sec.gov/Archives/edgar/data/19617/000089109211006036/e45230fwp.htm
+- Goodrich Corporation 2009 Annual Report:
+  https://media.corporate-ir.net/media_files/irol/60/60759/reports/2009_AR.pdf
+- Goodrich merger cash consideration and final option settlement:
+  https://infomemo.theocc.com/infomemos?date=201207&number=30993
 
 The Alpha dataset builder and universe discovery honor the quarantine.
 Stale OOS predictions are also filtered by Alpha downstream readers: the
@@ -79,16 +110,19 @@ Run locally with configured Supabase credentials:
 python -m jobs.audit_alpha_ticker_history --ticker CPWR --output-dir reports/alpha_price_anomalies
 ```
 
-The command creates:
+## EP and GR audit commands
 
-- `cpwr_price_history_summary.csv`: overlap, scale dispersion, maximum
-  observation-to-observation returns and flagged-session count.
-- `cpwr_price_history_comparison.csv`: date-level stored/reference OHLCV,
-  adjusted closes, returns, volume, Yahoo dividends/splits and reason flags.
+Reproduce the read-only checks with configured Supabase credentials:
 
-The median scale is diagnostic only; it is never applied to prices. Yahoo
-Finance is a comparison source, not authoritative ground truth. The audit
-does not modify Supabase or generate repair SQL.
+```powershell
+python -m jobs.audit_alpha_ticker_history --ticker EP --output-dir reports/alpha_price_anomalies
+python -m jobs.audit_alpha_ticker_history --ticker GR --output-dir reports/alpha_price_anomalies
+```
+
+The command creates one summary CSV and one date-level comparison CSV per
+ticker. It never modifies Supabase or generates repair SQL. Review these
+reports together with independent issuer/exchange evidence before any
+re-admission decision.
 
 ## Re-running Ridge
 
@@ -102,5 +136,5 @@ python -m jobs.evaluate_alpha --diagnostics-dir reports/alpha_diagnostics_ridge_
 Then use the newly generated prediction file for adjusted-price export and
 portfolio backtesting. Do not simply remove PARA/CPWR rows from older
 predictions: old Ridge folds may already have trained on contaminated labels.
-Previous OOS reports remain historical diagnostics and are not the final Ridge
-decision gate.
+The same applies to EP and GR. Previous OOS reports remain historical
+diagnostics and are not the final Ridge decision gate.

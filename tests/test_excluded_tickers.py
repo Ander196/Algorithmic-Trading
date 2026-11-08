@@ -18,6 +18,7 @@ EUROPEAN_TICKERS = {
     "LSEG.L", "NG.L", "PRU.L", "REL.L", "RIO.L", "SHEL.L",
     "ULVR.L", "VOD.L",
 }
+EXPECTED_ALPHA_QUALITY_EXCLUSIONS = frozenset({"PARA", "CPWR", "EP", "GR"})
 
 
 def test_exclusion_list_is_limited_to_deliberately_unsupported_european_symbols():
@@ -70,25 +71,24 @@ def test_excluded_row_filter_does_not_remove_valid_historical_sp500_symbols():
     assert excluded == ("ULVR.L",)
 
 
-
 def test_alpha_data_quality_symbols_are_quarantined_only_from_alpha_research():
-    assert ALPHA_DATA_QUALITY_EXCLUDED_TICKERS == frozenset({"PARA", "CPWR"})
-    assert is_excluded_from_alpha_history(" para ")
-    assert not is_excluded_ticker("PARA")
-    assert is_excluded_from_alpha_history("CPWR")
-    assert not is_excluded_ticker("CPWR")
+    assert ALPHA_DATA_QUALITY_EXCLUDED_TICKERS == EXPECTED_ALPHA_QUALITY_EXCLUSIONS
+    for ticker in EXPECTED_ALPHA_QUALITY_EXCLUSIONS:
+        assert is_excluded_from_alpha_history(f" {ticker.lower()} ")
+        assert not is_excluded_ticker(ticker)
 
 
-def test_alpha_universe_omits_para_and_cpwr():
+def test_alpha_universe_omits_quarantined_symbols():
     universe = set(get_alpha_universe(client=object(), market_ticker="SPY"))
-    assert "PARA" not in universe
-    assert "CPWR" not in universe
+    assert EXPECTED_ALPHA_QUALITY_EXCLUSIONS.isdisjoint(universe)
 
 
 def test_alpha_row_filter_applies_quality_quarantine_only_when_requested():
     import pandas as pd
 
-    rows = pd.DataFrame({"ticker": ["PARA", "CPWR", "ULVR.L"]})
+    rows = pd.DataFrame(
+        {"ticker": ["PARA", "CPWR", "EP", "GR", "ULVR.L"]}
+    )
     default_rows, default_excluded = filter_excluded_ticker_rows(
         rows, include_historical_retired=True
     )
@@ -98,7 +98,7 @@ def test_alpha_row_filter_applies_quality_quarantine_only_when_requested():
         include_alpha_quality_exclusions=True,
     )
 
-    assert default_rows["ticker"].tolist() == ["PARA", "CPWR"]
+    assert default_rows["ticker"].tolist() == ["PARA", "CPWR", "EP", "GR"]
     assert default_excluded == ("ULVR.L",)
     assert alpha_rows.empty
-    assert alpha_excluded == ("CPWR", "PARA", "ULVR.L")
+    assert alpha_excluded == ("CPWR", "EP", "GR", "PARA", "ULVR.L")

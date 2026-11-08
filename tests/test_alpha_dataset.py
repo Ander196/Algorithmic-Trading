@@ -3,6 +3,10 @@ import pandas as pd
 import pytest
 
 from core.alpha_dataset import AlphaDatasetBuilder, AlphaDatasetConfig
+from data.excluded_tickers import (
+    is_excluded_from_alpha_history,
+    is_excluded_ticker,
+)
 
 
 def _bars(seed: int, periods: int = 320) -> pd.DataFrame:
@@ -61,8 +65,15 @@ def test_invalid_inputs_are_rejected() -> None:
         AlphaDatasetBuilder().build({"AAA": bad}, _bars(2))
 
 
+@pytest.mark.parametrize("ticker", ["PARA", "CPWR", "EP", "GR"])
+def test_alpha_quality_quarantine_does_not_change_operational_exclusions(
+    ticker: str,
+) -> None:
+    assert is_excluded_from_alpha_history(ticker)
+    assert not is_excluded_ticker(ticker)
 
-def test_dataset_builder_excludes_non_snp_european_ticker():
+
+def test_dataset_builder_excludes_non_snp_european_and_quarantined_tickers():
     stock = _bars(1)
     market = _bars(2)
     dataset = AlphaDatasetBuilder(
@@ -74,6 +85,8 @@ def test_dataset_builder_excludes_non_snp_european_ticker():
             "QRVO": _bars(4, periods=280),
             "CPWR": _bars(5),
             "PARA": _bars(6),
+            "EP": _bars(7),
+            "GR": _bars(8),
             "BBB": _bars(3),
         },
         market,
@@ -84,6 +97,8 @@ def test_dataset_builder_excludes_non_snp_european_ticker():
     assert "ULVR.L" not in tickers
     assert "PARA" not in tickers
     assert "CPWR" not in tickers
+    assert "EP" not in tickers
+    assert "GR" not in tickers
     # A retained delisted symbol contributes only within its stored history.
     qrvo_dates = dataset.xs("QRVO", level="ticker").index
     assert qrvo_dates.max() < _bars(4, periods=280).index.max()
