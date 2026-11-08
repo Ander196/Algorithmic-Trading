@@ -318,7 +318,8 @@ def export_prices(predictions_csv: Path, output_csv: Path, *, benchmark: str = "
     if predictions[["date", "ticker"]].isna().any().any():
         raise ValueError("predictions CSV contains empty date/ticker values")
     predictions, excluded_tickers = filter_excluded_ticker_rows(
-        predictions, include_historical_retired=True
+        predictions, include_historical_retired=True,
+        include_alpha_quality_exclusions=True
     )
     if excluded_tickers:
         print(

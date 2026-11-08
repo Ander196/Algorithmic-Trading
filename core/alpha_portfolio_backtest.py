@@ -73,7 +73,8 @@ def _validate_predictions(predictions: pd.DataFrame) -> pd.DataFrame:
     rows["date"] = _naive_dates(pd.Index(rows["date"]))
     rows["ticker"] = rows["ticker"].astype(str)
     rows, excluded_tickers = filter_excluded_ticker_rows(
-        rows, include_historical_retired=True
+        rows, include_historical_retired=True,
+        include_alpha_quality_exclusions=True
     )
     if excluded_tickers:
         print(

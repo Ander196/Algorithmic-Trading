@@ -1,12 +1,15 @@
 from data.excluded_tickers import (
+    ALPHA_DATA_QUALITY_EXCLUDED_TICKERS,
     EXCLUDED_TICKERS,
+    filter_excluded_ticker_rows,
+    is_excluded_from_alpha_history,
     is_excluded_ticker,
     normalize_ticker,
-    filter_excluded_ticker_rows,
 )
 from data.data_loader import processTicker as process_incremental_ticker
 from data.data_loader_historical import processTicker as process_historical_ticker
 from data.sp500_universe import get_sp500_tickers, get_sp500_membership_periods
+from jobs.evaluate_alpha import get_alpha_universe
 
 
 EUROPEAN_TICKERS = {
@@ -65,3 +68,37 @@ def test_excluded_row_filter_does_not_remove_valid_historical_sp500_symbols():
 
     assert filtered["ticker"].tolist() == ["AAPL", "WBD", "QRVO", "MSFT"]
     assert excluded == ("ULVR.L",)
+
+
+
+def test_alpha_data_quality_symbols_are_quarantined_only_from_alpha_research():
+    assert ALPHA_DATA_QUALITY_EXCLUDED_TICKERS == frozenset({"PARA", "CPWR"})
+    assert is_excluded_from_alpha_history(" para ")
+    assert not is_excluded_ticker("PARA")
+    assert is_excluded_from_alpha_history("CPWR")
+    assert not is_excluded_ticker("CPWR")
+
+
+def test_alpha_universe_omits_para_and_cpwr():
+    universe = set(get_alpha_universe(client=object(), market_ticker="SPY"))
+    assert "PARA" not in universe
+    assert "CPWR" not in universe
+
+
+def test_alpha_row_filter_applies_quality_quarantine_only_when_requested():
+    import pandas as pd
+
+    rows = pd.DataFrame({"ticker": ["PARA", "CPWR", "ULVR.L"]})
+    default_rows, default_excluded = filter_excluded_ticker_rows(
+        rows, include_historical_retired=True
+    )
+    alpha_rows, alpha_excluded = filter_excluded_ticker_rows(
+        rows,
+        include_historical_retired=True,
+        include_alpha_quality_exclusions=True,
+    )
+
+    assert default_rows["ticker"].tolist() == ["PARA", "CPWR"]
+    assert default_excluded == ("ULVR.L",)
+    assert alpha_rows.empty
+    assert alpha_excluded == ("CPWR", "PARA", "ULVR.L")

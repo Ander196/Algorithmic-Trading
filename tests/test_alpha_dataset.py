@@ -72,6 +72,8 @@ def test_dataset_builder_excludes_non_snp_european_ticker():
             "AAA": stock,
             "ULVR.L": stock,
             "QRVO": _bars(4, periods=280),
+            "CPWR": _bars(5),
+            "PARA": _bars(6),
             "BBB": _bars(3),
         },
         market,
@@ -80,6 +82,8 @@ def test_dataset_builder_excludes_non_snp_european_ticker():
     tickers = set(dataset.index.get_level_values("ticker"))
     assert tickers == {"AAA", "BBB", "QRVO"}
     assert "ULVR.L" not in tickers
+    assert "PARA" not in tickers
+    assert "CPWR" not in tickers
     # A retained delisted symbol contributes only within its stored history.
     qrvo_dates = dataset.xs("QRVO", level="ticker").index
     assert qrvo_dates.max() < _bars(4, periods=280).index.max()
