@@ -31,13 +31,34 @@ Optional controls:
 ```powershell
 python -m jobs.audit_alpha_missing_history --tickers-csv reports/alpha_missing_tickers.csv --output-dir reports/alpha_missing_history_audit --max-tickers 25
 python -m jobs.audit_alpha_missing_history --tickers-csv reports/alpha_missing_tickers.csv --output-dir reports/alpha_missing_history_audit --retries 3 --delay-seconds 0.3
+python -m jobs.audit_alpha_missing_history --tickers-csv reports/alpha_missing_tickers.csv --output-dir reports/alpha_missing_history_audit --control-ticker SPY --control-start 2026-10-01 --control-end 2026-10-30
 ```
 
-Run a small smoke test first if desired. The default probe is serial to reduce
-provider throttling. For each S&P membership interval, Yahoo is queried with
-that interval's exact start date and exclusive end date. The query is therefore
-bounded to the period during which the canonical ticker belonged to the index.
-Symbols with multiple membership periods are probed separately.
+### Provider control and errors
+
+Before probing any missing symbol, the job requests a known liquid control
+(`AAPL` by default) over 2026-10-01 through 2026-10-30. The control must return
+at least one valid price observation. If it fails or returns no prices, the job
+aborts before classifying any missing ticker. A control result is saved to
+`alpha_missing_history_control.csv`, including the yfinance version and
+observed date range.
+
+The Yahoo request uses `raise_errors=True` so yfinance exceptions are surfaced
+instead of silently converted into empty DataFrames. The project currently
+allows yfinance versions from 0.2.36 onward; this argument remains supported
+but is deprecated in current upstream releases in favor of the debug
+configuration. Yahoo "no price data" exceptions and ordinary empty frames are
+counted as empty/no-data responses and retried. Network, rate-limit, and other
+exceptions are counted separately as provider errors. Provider errors must not
+be interpreted as missing security history.
+
+### Historical windows
+
+The default probe is serial to reduce provider throttling. For each S&P
+membership interval, Yahoo is queried with that interval's exact start date
+and exclusive end date. The query is therefore bounded to the period during
+which the canonical ticker belonged to the index. Symbols with multiple
+membership periods are probed separately.
 
 For dotted share-class symbols, when the canonical query returns no history,
 the job also tries a dot-to-hyphen spelling (for example, `CIT.A` then
@@ -48,21 +69,28 @@ The alternate spelling is a candidate only; it is not adopted automatically.
 
 - `alpha_missing_history_audit.csv`: one row per input ticker, with membership
   windows, curated final trading date when available, original Yahoo symbol,
-  number and date range of returned observations, dividends/splits reported by
-  the provider, optional share-class alias probe, and a triage status.
+  returned observation counts/date ranges, empty/no-data responses, provider
+  errors, dividend/split event counts, optional share-class alias probe, and a
+  triage status.
 - `alpha_missing_history_summary.csv`: counts by triage status.
+- `alpha_missing_history_control.csv`: control ticker, date window, returned
+  sessions/date range, yfinance version, and pass status.
 
 Statuses:
 
 - `primary_history_available_identity_review`: Yahoo returned observations
   under the original/canonical Yahoo symbol inside a membership window.
+- `primary_history_available_with_provider_issues`: some observations were
+  returned, but at least one window also had empty responses or errors.
 - `possible_share_class_alias_identity_review`: the original spelling had
   no observations, but the dot-to-hyphen candidate did.
-- `no_history_for_tested_yahoo_symbols`: tested symbols returned no history.
-  This is not proof that the security did not trade or that no other provider
-  or symbol mapping exists.
-- `primary_provider_error` / `provider_errors_no_conclusion`: provider
-  requests failed; these rows must be retried rather than classified as absent.
+- `share_class_alias_available_with_provider_issues`: the alias returned some
+  observations but also had empty responses or errors.
+- `no_history_for_tested_yahoo_symbols`: tested symbols returned no history
+  after retries, while the liquid control passed. This is not proof that the
+  security did not trade or that no other archive contains its history.
+- `provider_errors_no_conclusion`: one or more Yahoo requests failed for
+  reasons other than a no-data response; retry rather than classify as absent.
 - `not_in_sp500_membership_file`: input ticker not found in the configured
   historical universe.
 
@@ -88,9 +116,13 @@ usable Supabase history. Cross-referencing the failure list with
 - 30 end in Q. This can be associated with an OTC/distress symbol convention,
   but the suffix alone is not enough to determine bankruptcy or issuer identity.
 
-This confirms that the observed coverage gap is concentrated in former
-constituents, but it does not explain why each price series is absent. The
-Yahoo probe is the next diagnostic step.
+The first Yahoo probe returned no prices for all 461 canonical symbols and all
+six dotted-class alternatives, with no exceptions recorded. That result is
+not sufficient to conclude that all 467 symbol spellings lack history: the
+first version did not validate access with a liquid control and allowed
+yfinance's default behavior of logging some failures and returning empty
+DataFrames. Repeat the audit with this control-enabled version before
+classifying any provider-coverage gap.
 
 ## Review and repair policy
 
