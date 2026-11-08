@@ -48,7 +48,8 @@ def _load_predictions(path: Path) -> pd.DataFrame:
     rows["date"] = pd.to_datetime(rows["date"], errors="raise").dt.normalize()
     rows["ticker"] = rows["ticker"].astype(str).str.strip().str.upper()
     rows, _excluded = filter_excluded_ticker_rows(
-        rows, include_historical_retired=True
+        rows, include_historical_retired=True,
+        include_alpha_quality_exclusions=True
     )
     rows = filter_sp500_membership_rows(
         rows, ticker_column="ticker", date_column="date"
