@@ -72,16 +72,17 @@ def test_excluded_row_filter_does_not_remove_valid_historical_sp500_symbols():
 
 
 def test_para_is_quarantined_only_from_alpha_research():
-    assert ALPHA_DATA_QUALITY_EXCLUDED_TICKERS == frozenset({"PARA"})
+    assert ALPHA_DATA_QUALITY_EXCLUDED_TICKERS == frozenset({"PARA", "CPWR"})
     assert is_excluded_from_alpha_history(" para ")
     assert not is_excluded_ticker("PARA")
-    assert not is_excluded_from_alpha_history("CPWR")
+    assert is_excluded_from_alpha_history("CPWR")
+    assert not is_excluded_ticker("CPWR")
 
 
 def test_alpha_universe_omits_para_but_keeps_cpwr():
     universe = set(get_alpha_universe(client=object(), market_ticker="SPY"))
     assert "PARA" not in universe
-    assert "CPWR" in universe
+    assert "CPWR" not in universe
 
 
 def test_alpha_row_filter_applies_quality_quarantine_only_when_requested():
@@ -99,5 +100,5 @@ def test_alpha_row_filter_applies_quality_quarantine_only_when_requested():
 
     assert default_rows["ticker"].tolist() == ["PARA", "CPWR"]
     assert default_excluded == ("ULVR.L",)
-    assert alpha_rows["ticker"].tolist() == ["CPWR"]
-    assert alpha_excluded == ("PARA", "ULVR.L")
+    assert alpha_rows.empty
+    assert alpha_excluded == ("CPWR", "PARA", "ULVR.L")
