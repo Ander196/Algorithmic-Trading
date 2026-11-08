@@ -71,7 +71,7 @@ def test_excluded_row_filter_does_not_remove_valid_historical_sp500_symbols():
 
 
 
-def test_para_is_quarantined_only_from_alpha_research():
+def test_alpha_data_quality_symbols_are_quarantined_only_from_alpha_research():
     assert ALPHA_DATA_QUALITY_EXCLUDED_TICKERS == frozenset({"PARA", "CPWR"})
     assert is_excluded_from_alpha_history(" para ")
     assert not is_excluded_ticker("PARA")
@@ -79,7 +79,7 @@ def test_para_is_quarantined_only_from_alpha_research():
     assert not is_excluded_ticker("CPWR")
 
 
-def test_alpha_universe_omits_para_but_keeps_cpwr():
+def test_alpha_universe_omits_para_and_cpwr():
     universe = set(get_alpha_universe(client=object(), market_ticker="SPY"))
     assert "PARA" not in universe
     assert "CPWR" not in universe
