@@ -61,7 +61,7 @@ def test_dot_to_hyphen_share_class_spelling_is_flagged_as_candidate_only():
         sleeper=lambda _: None,
     )
 
-    assert calls == ["CIT.A", "CIT-A"]
+    assert calls == ["CIT.A", "CIT.A", "CIT-A"]
     assert result["primary_sessions"] == 0
     assert result["alias_sessions"] == 2
     assert result["status"] == "possible_share_class_alias_identity_review"
@@ -123,6 +123,8 @@ def test_repeated_membership_windows_are_probed_separately():
 
     assert calls == [
         ("2007-07-02", "2009-06-05"),
+        ("2007-07-02", "2009-06-05"),
+        ("2011-03-01", "2015-01-27"),
         ("2011-03-01", "2015-01-27"),
     ]
     assert result["membership_period_count"] == 2
